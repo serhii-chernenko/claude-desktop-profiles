@@ -77,17 +77,15 @@ enum HomeCards {
             if environment.isRunning(sourcePath) {
                 chips.append(StatusChip(text: "Running", tone: .positive))
             }
-            if let sourceVersion {
-                chips.append(StatusChip(text: "Version \(shortVersion(sourceVersion))", tone: .neutral))
-            }
         }
+        let kind = installed ? sourceVersion.map { "Your regular Claude · \(shortVersion($0))" } ?? "Your regular Claude" : "Your regular Claude"
         return ProfileCardModel(
             item: .main,
             name: "Main Claude",
             colorHex: nil,
             glyph: "person.crop.circle.fill",
             usesSymbolGlyph: true,
-            kind: "Your regular Claude",
+            kind: kind,
             chips: chips,
             action: installed ? .open(sourcePath) : .unavailable,
             checksClaudeUpdates: installed
