@@ -52,6 +52,7 @@ enum SelfTest {
 
     static func run() -> Int32 {
         parserChecks()
+        updateMenuChecks()
         guard let script = CLILocator.bundledCLI() else {
             print("FAIL  bundled CLI not found (Contents/Resources/cli/bin/claude-profiles or $\(CLILocator.overrideVariable))")
             return 1
@@ -81,6 +82,25 @@ enum SelfTest {
         }
         print("Self-test failed: \(failures.count) of \(passed + failures.count) checks")
         return 1
+    }
+
+    private static func updateMenuChecks() {
+        let matching = ["Check for Updates…", "Check for updates...", "Check For Update", "check for updates", "  Check for Updates…  ", "CHECK FOR UPDATES…"]
+        for name in matching {
+            expect(ClaudeUpdateCheck.isUpdateMenuItem(name), "update menu matcher accepts \"\(name)\"")
+        }
+        let rejected = ["", "About Claude", "Checking for Updates…", "Check for Claude Updates", "Updates", "Settings…", "Quit Claude"]
+        for name in rejected {
+            expect(!ClaudeUpdateCheck.isUpdateMenuItem(name), "update menu matcher rejects \"\(name)\"")
+        }
+        let output = "2\tClaude\t1\tAbout Claude\n2\tClaude\t2\tCheck for Updates…\n3\tFile\t1\tCheck for Update\nbroken line\nx\tFile\t1\tNope\n"
+        let entries = ClaudeUpdateCheck.parseMenuEntries(output)
+        expect(entries.count == 3 && entries[1] == MenuEntry(menuIndex: 2, menuName: "Claude", itemIndex: 2, itemName: "Check for Updates…"), "menu entry parser keeps well-formed rows and drops malformed ones")
+        expect(ClaudeUpdateCheck.updateMenuItem(in: entries)?.itemIndex == 2 && ClaudeUpdateCheck.updateMenuItem(in: entries)?.menuIndex == 2, "update item is found in the first menu")
+        let laterOnly = [MenuEntry(menuIndex: 2, menuName: "Claude", itemIndex: 1, itemName: "About Claude"), MenuEntry(menuIndex: 5, menuName: "Help", itemIndex: 3, itemName: "Check for updates...")]
+        expect(ClaudeUpdateCheck.updateMenuItem(in: laterOnly)?.menuName == "Help", "update item falls back to the other menus")
+        expect(ClaudeUpdateCheck.updateMenuItem(in: [MenuEntry(menuIndex: 2, menuName: "Claude", itemIndex: 1, itemName: "About Claude")]) == nil && ClaudeUpdateCheck.updateMenuItem(in: []) == nil, "no update item is reported when none matches")
+        expect(ClaudeUpdateCheck.isPermissionFailure("execution error: Not authorized to send Apple events to System Events. (-1743)") && ClaudeUpdateCheck.isPermissionFailure("osascript is not allowed assistive access. (-25211)") && !ClaudeUpdateCheck.isPermissionFailure("Can’t get application process. (-1728)"), "permission failures are told apart from a missing process")
     }
 
     private static func parserChecks() {
@@ -190,6 +210,7 @@ enum SelfTest {
         let status = PlainParser.status("source\t/Applications/Claude.app\t1.0 (1)\t1")
         let cards = HomeCards.cards(sourcePath: "/Applications/Claude.app", status: status, profiles: [desktopSelf, hidden, cliOnly], details: details, environment: environment)
         expect(cards.count == 4 && cards.first?.item == .main && cards.map(\.name) == ["Main Claude", "Work", "Side", "Ci"], "home cards list Main Claude first, then every profile")
+        expect(cards[0].checksClaudeUpdates && !cards[1].checksClaudeUpdates && !cards[3].checksClaudeUpdates, "only the main card offers the Claude update check")
         expect(cards[0].chips.map(\.text) == ["Running", "Version 1.0"] && cards[0].action == .open("/Applications/Claude.app"), "main card shows running state and opens Claude.app")
         expect(cards[1].kind == "Desktop app + Terminal" && cards[1].glyph == "W" && cards[1].chips.map(\.text) == ["Running", "Up to date", "Self mode"] && cards[1].action == .open("/A/Claude Work.app"), "self-mode card is running, up to date and opens its app")
         let sameBuild = HomeCards.card(for: desktopSelf, details: details["work"], sourceVersion: "1.0 (1)", environment: environment)
@@ -204,6 +225,7 @@ enum SelfTest {
         let missingApp = HomeCards.card(for: desktopSelf, details: details["work"], sourceVersion: "1.0", environment: HomeEnvironment(isRunning: { _ in false }, appVersion: { _ in nil }, fileExists: { _ in false }))
         expect(missingApp.chips.first?.text == "Not built" && missingApp.action == .unavailable, "a profile whose app is missing reads as not built")
         expect(HomeCards.main(sourcePath: "/x/Claude.app", sourceVersion: nil, environment: HomeEnvironment(isRunning: { _ in false }, appVersion: { _ in nil }, fileExists: { _ in false })).chips.map(\.text) == ["Not installed"], "main card reports a missing Claude.app")
+        expect(!HomeCards.main(sourcePath: "/x/Claude.app", sourceVersion: nil, environment: HomeEnvironment(isRunning: { _ in false }, appVersion: { _ in nil }, fileExists: { _ in false })).checksClaudeUpdates, "main card hides the update check when Claude is missing")
 
         let good = PlainParser.status("cli_installed\t1\t/h/.local/bin/claude-profiles\ncli_current\t1\nidentity\tSigning\t1\t1\nagent\tlabel\t1")
         let goodItems = SetupStatus.items(status: good, shell: ShellStatus(installed: true, rcFile: nil, conflicts: []))
@@ -217,6 +239,38 @@ enum SelfTest {
         expect(CLIUpdatePolicy.decide(bundled: "0.10.0", installed: "0.9.0").shouldInstall && !CLIUpdatePolicy.decide(bundled: "0.9.0", installed: "0.10.0").shouldInstall, "command-line tool versions compare numerically")
         expect(CLIUpdatePolicy.decide(bundled: "0.1.0", installed: nil).shouldInstall && !CLIUpdatePolicy.decide(bundled: nil, installed: "0.1.0").shouldInstall && !CLIUpdatePolicy.decide(bundled: "dev", installed: "0.1.0").shouldInstall, "a missing installed version is updated, an unknown bundled version is left alone")
         expect(Set(goodItems.map(\.anchor)).count == 3, "setup items link to the command-line, shell and rebuild settings sections")
+        setupCompletionChecks(good: good, stale: stale)
+    }
+
+    private static func setupCompletionChecks(good: StatusSummary, stale: StatusSummary) {
+        func status(_ rows: String) -> StatusSummary { PlainParser.status(rows) }
+        let agentOnly = status("agent\tlabel\t1")
+        let unusableIdentity = status("identity\tSigning\t1\t0\nagent\tlabel\t1")
+        let absentIdentity = status("identity\tSigning\t0\t0\nagent\tlabel\t1")
+        let unloadedAgent = status("identity\tSigning\t1\t1\nagent\tlabel\t0")
+        let identityOnly = status("identity\tSigning\t1\t1")
+        expect(SetupStatus.completion(good) == .complete && !SetupStatus.needsSetup(good), "setup is complete when the agent is loaded and the identity is present and usable")
+        expect(SetupStatus.completion(unloadedAgent) == .incomplete && SetupStatus.needsSetup(unloadedAgent), "setup is incomplete when the agent is not loaded")
+        expect(SetupStatus.completion(unusableIdentity) == .incomplete, "setup is incomplete when the identity is present but not usable")
+        expect(SetupStatus.completion(absentIdentity) == .incomplete, "setup is incomplete when the identity is absent")
+        expect(SetupStatus.completion(stale) == .incomplete, "setup is incomplete when both pieces are missing")
+        expect(SetupStatus.completion(nil) == .unknown && !SetupStatus.needsSetup(nil), "setup stays unknown before the first refresh and shows no banner")
+        expect(SetupStatus.completion(agentOnly) == .unknown && SetupStatus.completion(identityOnly) == .unknown, "setup stays unknown while one of the two rows is missing")
+        expect(SetupStatus.completion(status("identity\tSigning\t0\t0")) == .incomplete, "a known-missing piece makes setup incomplete even when the other row is missing")
+
+        let doneSteps = HowItWorks.steps(status: good)
+        expect(doneSteps.map(\.number) == [1, 2, 3, 4] && doneSteps[1].title == "One-time setup" && doneSteps[3].title == "Optional: Terminal", "how it works has four steps with the setup as step two")
+        expect(doneSteps.map(\.mark) == [.neutral, .done, .neutral, .neutral], "step two shows a green check once setup is done")
+        expect(HowItWorks.steps(status: stale).map(\.mark) == [.neutral, .pending, .neutral, .neutral], "step two shows an orange dot while setup is missing")
+        expect(HowItWorks.steps(status: nil).allSatisfy { $0.mark == .neutral }, "no step is marked before the first refresh")
+        expect(SetupCopy.bannerBody(hasProfiles: true) == SetupCopy.explanation, "the banner body is the plain explanation when profiles exist")
+        expect(SetupCopy.bannerBody(hasProfiles: false).hasSuffix(SetupCopy.firstProfileNudge) && SetupCopy.bannerBody(hasProfiles: false).hasPrefix(SetupCopy.explanation), "the banner body adds the first-profile nudge when there are no profiles")
+        let model = MainActor.assumeIsolated { AppModel(runner: nil) }
+        expect(MainActor.assumeIsolated { !model.setupNeeded && !model.showsSetupFollowUp }, "a model without status does not ask for setup")
+        MainActor.assumeIsolated { model.status = stale }
+        expect(MainActor.assumeIsolated { model.setupNeeded }, "a model with a missing agent and identity asks for setup")
+        MainActor.assumeIsolated { model.status = good }
+        expect(MainActor.assumeIsolated { !model.setupNeeded }, "a model with everything set up stops asking")
     }
 
     private static func integrationChecks(script: URL, root: String, home: String, settings: String) throws {

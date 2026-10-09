@@ -512,4 +512,4 @@ Deleting `$DATA_DIR` signs the account out of that copy; deleting `$CONFIG_DIR` 
 rm -rf "$WORK"
 ```
 
-Then tell the user what is done and list the human-only steps still pending: pin `Claude <Name>` (the app in self mode, the launcher in launcher mode), sign in, click **Always Allow** on the Keychain prompt, and optionally run `setup` in Terminal.
+Then tell the user what is done and list the human-only steps still pending: pin `Claude <Name>` (the app in self mode, the launcher in launcher mode), sign in, click **Always Allow** on the Keychain prompt, and run the one-time `setup` in Terminal if `status --plain` shows the agent or identity missing (without it profiles do not follow Claude updates and every rebuild re-prompts Keychain and permissions).

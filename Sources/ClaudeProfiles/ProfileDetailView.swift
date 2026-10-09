@@ -26,6 +26,9 @@ struct ProfileDetailView: View {
     var body: some View {
         Form {
             header
+            if profile.isDesktop && model.setupNeeded {
+                setupWarning
+            }
             actions
             paths
             if cliEnabled {
@@ -95,6 +98,23 @@ struct ProfileDetailView: View {
                 ColorPicker("Icon color", selection: $colorDraft, supportsOpacity: false)
                     .labelsHidden()
                     .disabled(model.isBusy)
+            }
+        }
+    }
+
+    private var setupWarning: some View {
+        Section {
+            HStack(alignment: .center, spacing: 10) {
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .foregroundStyle(.orange)
+                Text(SetupCopy.detailWarning)
+                    .font(.callout)
+                Spacer(minLength: 8)
+                Button("Set Up…") {
+                    Task { await model.startSetup() }
+                }
+                .buttonStyle(.link)
+                .disabled(model.isBusy || model.cliMissing)
             }
         }
     }

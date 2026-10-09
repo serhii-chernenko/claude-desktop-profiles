@@ -25,6 +25,7 @@ struct HomeView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 34) {
                 welcome
+                setupBanner
                 adoptBanners
                 howItWorks
                 profilesSection
@@ -61,6 +62,13 @@ struct HomeView: View {
     }
 
     @ViewBuilder
+    private var setupBanner: some View {
+        if model.setupNeeded {
+            SetupBanner(hasProfiles: !model.profiles.isEmpty)
+        }
+    }
+
+    @ViewBuilder
     private var adoptBanners: some View {
         if !model.visibleCandidates.isEmpty {
             VStack(spacing: 10) {
@@ -74,10 +82,10 @@ struct HomeView: View {
     private var howItWorks: some View {
         VStack(alignment: .leading, spacing: 14) {
             SectionTitle("How it works")
-            HStack(alignment: .top, spacing: 16) {
-                StepCard(number: 1, title: "Create a profile", text: "Give it a name and a color.")
-                StepCard(number: 2, title: "Open it like any app", text: "Start it from the Dock or Spotlight and sign in.")
-                StepCard(number: 3, title: "Optional: Terminal", text: "Turn on Terminal integration so `claude` picks the profile by folder.")
+            StepGridLayout {
+                ForEach(HowItWorks.steps(status: model.status)) { step in
+                    StepCard(step: step)
+                }
             }
         }
     }
@@ -136,31 +144,176 @@ struct SectionTitle: View {
     }
 }
 
+struct StepGridLayout: Layout {
+    var spacing: CGFloat = 16
+    var minimumCardWidth: CGFloat = 190
+
+    private func columnCount(width: CGFloat, count: Int) -> Int {
+        guard count > 0 else { return 1 }
+        let fitting = Int(((width + spacing) / (minimumCardWidth + spacing)).rounded(.down))
+        for candidate in [count, (count + 1) / 2] where candidate <= fitting {
+            return candidate
+        }
+        return 1
+    }
+
+    private func cardWidth(width: CGFloat, columns: Int) -> CGFloat {
+        (width - spacing * CGFloat(columns - 1)) / CGFloat(columns)
+    }
+
+    private func rowHeights(width: CGFloat, columns: Int, subviews: Subviews) -> [CGFloat] {
+        let proposed = ProposedViewSize(width: cardWidth(width: width, columns: columns), height: nil)
+        let heights = subviews.map { $0.sizeThatFits(proposed).height }
+        return stride(from: 0, to: heights.count, by: columns).map { start in
+            heights[start..<min(start + columns, heights.count)].max() ?? 0
+        }
+    }
+
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+        let width = proposal.width ?? 900
+        let columns = columnCount(width: width, count: subviews.count)
+        let heights = rowHeights(width: width, columns: columns, subviews: subviews)
+        return CGSize(width: width, height: heights.reduce(0, +) + spacing * CGFloat(max(0, heights.count - 1)))
+    }
+
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+        let columns = columnCount(width: bounds.width, count: subviews.count)
+        let width = cardWidth(width: bounds.width, columns: columns)
+        let heights = rowHeights(width: bounds.width, columns: columns, subviews: subviews)
+        var y = bounds.minY
+        for (row, height) in heights.enumerated() {
+            for column in 0..<columns {
+                let index = row * columns + column
+                guard index < subviews.count else { break }
+                subviews[index].place(
+                    at: CGPoint(x: bounds.minX + CGFloat(column) * (width + spacing), y: y),
+                    anchor: .topLeading,
+                    proposal: ProposedViewSize(width: width, height: height)
+                )
+            }
+            y += height + spacing
+        }
+    }
+}
+
 struct StepCard: View {
-    let number: Int
-    let title: String
-    let text: LocalizedStringKey
+    let step: HowItWorksStep
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
-            Text("\(number)")
-                .font(.system(size: 14, weight: .bold, design: .rounded))
-                .foregroundStyle(.white)
-                .frame(width: 28, height: 28)
-                .background(Circle().fill(Color.accentColor.gradient))
+            HStack(alignment: .center) {
+                Text("\(step.number)")
+                    .font(.system(size: 14, weight: .bold, design: .rounded))
+                    .foregroundStyle(.white)
+                    .frame(width: 28, height: 28)
+                    .background(Circle().fill(Color.accentColor.gradient))
+                Spacer(minLength: 8)
+                StepMarkView(mark: step.mark)
+            }
             VStack(alignment: .leading, spacing: 4) {
-                Text(title)
+                Text(step.title)
                     .font(.headline)
-                Text(text)
+                Text(LocalizedStringKey(step.text))
                     .font(.callout)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
             Spacer(minLength: 0)
         }
-        .frame(maxWidth: .infinity, alignment: .topLeading)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .padding(16)
         .cardBackground(cornerRadius: 12)
+        .accessibilityElement(children: .combine)
+    }
+}
+
+struct StepMarkView: View {
+    let mark: StepMark
+
+    var body: some View {
+        switch mark {
+        case .done:
+            Label("Done", systemImage: "checkmark.circle.fill")
+                .font(.caption.weight(.medium))
+                .foregroundStyle(.green)
+        case .pending:
+            HStack(spacing: 5) {
+                Circle()
+                    .fill(Color.orange)
+                    .frame(width: 8, height: 8)
+                Text("To do")
+                    .font(.caption.weight(.medium))
+                    .foregroundStyle(.orange)
+            }
+        case .neutral:
+            EmptyView()
+        }
+    }
+}
+
+struct SetupBanner: View {
+    @EnvironmentObject var model: AppModel
+    let hasProfiles: Bool
+    @State private var showsWhy = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(alignment: .top, spacing: 16) {
+                Image(systemName: "wand.and.stars")
+                    .font(.system(size: 22, weight: .semibold))
+                    .foregroundStyle(.white)
+                    .frame(width: 46, height: 46)
+                    .background(RoundedRectangle(cornerRadius: 11, style: .continuous).fill(Color.accentColor.gradient))
+                VStack(alignment: .leading, spacing: 6) {
+                    Text(SetupCopy.bannerTitle)
+                        .font(.title3.weight(.semibold))
+                    Text(SetupCopy.bannerBody(hasProfiles: hasProfiles))
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                    HStack(spacing: 14) {
+                        Button("Set Up…") {
+                            Task { await model.startSetup() }
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .controlSize(.large)
+                        .disabled(model.isBusy || model.cliMissing)
+                        Button(showsWhy ? "Hide" : "Why?") {
+                            withAnimation(.easeInOut(duration: 0.15)) { showsWhy.toggle() }
+                        }
+                        .buttonStyle(.link)
+                    }
+                    .padding(.top, 4)
+                }
+                Spacer(minLength: 0)
+            }
+            if showsWhy {
+                VStack(alignment: .leading, spacing: 8) {
+                    bullet(SetupCopy.agentReason)
+                    bullet(SetupCopy.certificateReason)
+                    Text(SetupCopy.passwordNote)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .padding(.top, 2)
+                }
+                .padding(.leading, 62)
+            }
+        }
+        .padding(20)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(RoundedRectangle(cornerRadius: 14).fill(Color.accentColor.opacity(0.14)))
+        .overlay(RoundedRectangle(cornerRadius: 14).strokeBorder(Color.accentColor.opacity(0.55), lineWidth: 1.5))
+        .accessibilityElement(children: .contain)
+    }
+
+    private func bullet(_ text: String) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: 8) {
+            Text("•")
+            Text(text)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .font(.callout)
     }
 }
 
@@ -191,6 +344,14 @@ struct ProfileCard: View {
             }
             .frame(maxWidth: .infinity, minHeight: 22, alignment: .leading)
             HStack {
+                if card.checksClaudeUpdates {
+                    Button("Check for Updates") {
+                        Task { await model.checkForClaudeUpdates() }
+                    }
+                    .buttonStyle(.link)
+                    .disabled(model.isCheckingClaudeUpdates)
+                    .help("Check for Claude Updates. \(ClaudeUpdateCheck.caption)")
+                }
                 Spacer(minLength: 0)
                 actionButton
             }

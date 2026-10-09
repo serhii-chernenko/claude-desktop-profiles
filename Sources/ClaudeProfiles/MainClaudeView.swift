@@ -37,6 +37,12 @@ struct MainClaudeView: View {
                     Button("Open") { SystemActions.openApplication(model.sourceAppPath) }
                         .disabled(!model.sourceAppPresent)
                 }
+                ActionRow(title: "Check for Claude Updates",
+                          caption: ClaudeUpdateCheck.caption,
+                          systemImage: "arrow.triangle.2.circlepath") {
+                    Button("Check") { Task { await model.checkForClaudeUpdates() } }
+                        .disabled(model.isCheckingClaudeUpdates || !model.sourceAppPresent)
+                }
                 ActionRow(title: "Send sign-in links here",
                           caption: "Makes claude:// links open Main Claude again, for example after signing in to a profile.",
                           systemImage: "link") {

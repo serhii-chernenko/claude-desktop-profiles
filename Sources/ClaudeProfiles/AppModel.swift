@@ -56,6 +56,8 @@ final class AppModel: ObservableObject {
     @Published var loadError: String?
     @Published var layoutBlocks: [String: [LegacyAgent]] = [:]
     @Published var settingsScrollTarget: String?
+    @Published var isCheckingClaudeUpdates = false
+    @Published var showsSetupFollowUp = false
 
     let runner: CLIRunner?
     private(set) var nextLogID = 0
@@ -66,6 +68,8 @@ final class AppModel: ObservableObject {
     init(runner: CLIRunner? = CLILocator.bundledCLI().map { CLIRunner(script: $0) }) {
         self.runner = runner
     }
+
+    var setupNeeded: Bool { SetupStatus.needsSetup(status) }
 
     var isBusy: Bool { activeCommand != nil }
     var cliMissing: Bool { runner == nil }
@@ -252,6 +256,77 @@ final class AppModel: ObservableObject {
         }
     }
 
+    func checkForClaudeUpdates() async {
+        guard !isCheckingClaudeUpdates else { return }
+        isCheckingClaudeUpdates = true
+        defer { isCheckingClaudeUpdates = false }
+        logVisible = true
+        appendLog("Check for Claude Updates", isError: false, isCommand: true)
+        guard AXIsProcessTrusted() else {
+            await handleMissingAccessibility()
+            return
+        }
+        let activation = await ClaudeUpdateCheck.activateClaude()
+        switch activation {
+        case .notInstalled:
+            reportUpdateCheckProblem("Claude is not installed, so there is nothing to check.", title: "Claude not found")
+            return
+        case .failed(let reason):
+            reportUpdateCheckProblem("Could not open Claude: \(reason)", title: "Could not open Claude")
+            return
+        case .alreadyRunning, .launched:
+            appendLog("Claude is active.", isError: false, isCommand: false)
+        }
+        switch await ClaudeUpdateCheck.findUpdateItem(attempts: activation.isFreshLaunch ? 20 : 2) {
+        case .found(let entry):
+            let result = await ClaudeUpdateCheck.click(entry)
+            if result.status == 0 {
+                appendLog("Clicked “\(entry.itemName)” in Claude's “\(entry.menuName)” menu. Claude runs its own update check; profiles follow automatically after Claude updates.", isError: false, isCommand: false)
+            } else {
+                reportClickFailure(result, detail: "Could not click “\(entry.itemName)”.")
+            }
+        case .notFound:
+            reportUpdateCheckFallback("Claude's menu has no “Check for Updates…” item.", title: "Update item not found")
+        case .failed(let result):
+            reportClickFailure(result, detail: "Could not read Claude's menu.")
+        }
+    }
+
+    private func handleMissingAccessibility() async {
+        appendLog("Accessibility access is not granted to Claude Profiles, so Claude's update menu cannot be clicked.", isError: true, isCommand: false)
+        switch ClaudeUpdateCheck.askAboutAccessibility() {
+        case .openSettings:
+            NSWorkspace.shared.open(ClaudeUpdateCheck.accessibilitySettingsURL)
+            appendLog("Opened Accessibility settings. Enable Claude Profiles there, then run the check again.", isError: false, isCommand: false)
+        case .justOpenClaude:
+            _ = await ClaudeUpdateCheck.activateClaude()
+            appendLog(ClaudeUpdateCheck.manualPath, isError: false, isCommand: false)
+            ClaudeUpdateCheck.showInfo(title: "Check for updates in Claude", message: ClaudeUpdateCheck.manualPath)
+        case .cancel:
+            appendLog("Cancelled.", isError: false, isCommand: false)
+        }
+    }
+
+    private func reportClickFailure(_ result: ScriptResult, detail: String) {
+        if ClaudeUpdateCheck.isPermissionFailure(result.stderr) {
+            reportUpdateCheckFallback(ClaudeUpdateCheck.permissionMessage(result.stderr), title: "Permission needed")
+        } else {
+            let reason = result.stderr.isEmpty ? "osascript exited \(result.status)." : result.stderr
+            reportUpdateCheckFallback("\(detail) \(reason)", title: "Could not run the update check")
+        }
+    }
+
+    private func reportUpdateCheckProblem(_ problem: String, title: String) {
+        appendLog(problem, isError: true, isCommand: false)
+        ClaudeUpdateCheck.showInfo(title: title, message: problem)
+    }
+
+    private func reportUpdateCheckFallback(_ problem: String, title: String) {
+        appendLog(problem, isError: true, isCommand: false)
+        appendLog(ClaudeUpdateCheck.manualPath, isError: false, isCommand: false)
+        ClaudeUpdateCheck.showInfo(title: title, message: "\(problem)\n\n\(ClaudeUpdateCheck.manualPath)")
+    }
+
     func clearLog() {
         log.removeAll()
         lastExitStatus = nil
@@ -282,6 +357,14 @@ final class AppModel: ObservableObject {
     func showLegacyAgents() {
         settingsScrollTarget = SettingsView.legacyAgentsAnchor
         selection = .settings
+    }
+
+    func offerSetupAfterCreate() {
+        guard setupNeeded else { return }
+        Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 450_000_000)
+            showsSetupFollowUp = setupNeeded
+        }
     }
 
     func startSetup() async {

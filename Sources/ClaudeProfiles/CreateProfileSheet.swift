@@ -276,6 +276,7 @@ struct CreateProfileSheet: View {
                     model.selection = .profile(slug)
                 }
                 dismiss()
+                model.offerSetupAfterCreate()
             } else {
                 error = result.failureSummary
             }

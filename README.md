@@ -20,21 +20,29 @@ Requires macOS 13 or newer. Desktop profiles also need an installed `/Applicatio
 
 1. Download `Claude-Profiles-<version>.dmg` from the [Releases](https://github.com/serhii-chernenko/claude-desktop-profiles/releases) page and drag **Claude Profiles** to **Applications**.
 2. Open it from Applications and approve it once with **Open Anyway** (see [First launch](#first-launch-gatekeeper)).
-3. Use the window. Pin the new **Claude `<Name>`** (in `/Applications`) to the Dock. It is the profile itself: open it any way you like.
+3. Follow the four steps below.
+
+### Quick start
+
+1. **Create a profile.** Press **New Profile** (or ⌘N), give it a name and a color.
+2. **Do the one-time setup.** Press **Set Up…** in the banner at the top of Home (about 1 minute). Terminal opens once and asks for your login password; the app never sees it. This step is not optional in practice: it installs the auto-rebuild agent, so profiles follow Claude's updates, and a stable signing certificate, so macOS stops asking for Keychain access and permissions again after every rebuild. Without it, profiles stay on the old Claude version after Claude updates and macOS re-prompts after every rebuild. The banner disappears when both are in place.
+3. **Open it like any app.** Pin the new **Claude `<Name>`** (in `/Applications`) to the Dock, or start it from Spotlight, and sign in. It is the profile itself: open it any way you like.
+4. **Optional: Terminal.** Turn on shell integration under **Setup & Settings** so `claude` picks the profile by folder.
 
 ### The window
 
-- **Home.** The window opens on **Home**: how it works in a few steps, a card for each profile (name, kind, running and up-to-date state, an **Open** button, and a click-through to the profile page) and a setup status row (auto-rebuild agent, signing identity, command-line tool, shell integration; click one to jump to its settings), so you can see at a glance what is left to do.
+- **Home.** The window opens on **Home**. Until the one-time setup is done, a **Finish the one-time setup** banner sits at the top (with **Set Up…** and a **Why?** explanation); it disappears when the auto-rebuild agent is loaded and the signing identity is usable. Below it: how it works in four steps (step 2, the one-time setup, shows a green check when done and an orange dot until then), a card for each profile (name, kind, running and up-to-date state, an **Open** button, and a click-through to the profile page) and a setup status row (auto-rebuild agent, signing identity, command-line tool, shell integration; click one to jump to its settings), so you can see at a glance what is left to do.
 - **Sidebar.** **Home** at the top, then your profiles, **Main Claude** (your regular app and `~/.claude`, read-only: profiles never change it) and **Setup & Settings**. **New Profile** (or press ⌘N) and **About** are at the bottom.
-- **Create a profile.** Give it a name, pick an **icon color** with the color picker (the tint is applied to the app's Dock icon), and choose what it is for: the desktop app, Claude Code, or both. You can reuse an existing data folder (which keeps its sign-in and chats) or config folder, bring existing projects along (share, move or copy, see below) and list folders that select the profile automatically.
-- **A profile page** has the color picker (recolor takes seconds, no rebuild), **Open**, **Move to New Layout** (only for profiles that still use a launcher, see [Where the apps live](#where-the-apps-live)), **Fix Dock** (only when the Dock pins an old launcher, a hidden copy or a dead pin), **Rebuild**, **Check**, **Link Sign-in** / **Back to Main** (sends `claude://` sign-in links to the profile for a while, then back), **Copy Command** (the `claude-<slug>` command), **Remove** (keeps data and history unless you tick the delete boxes), the folders that auto-select the profile, and its Claude Code projects.
+- **Create a profile.** Give it a name, pick an **icon color** with the color picker (the tint is applied to the app's Dock icon), and choose what it is for: the desktop app, Claude Code, or both. You can reuse an existing data folder (which keeps its sign-in and chats) or config folder, bring existing projects along (share, move or copy, see below) and list folders that select the profile automatically. When setup is still missing, a follow-up asks "Finish the one-time setup now?" after the profile is created (**Set Up…** or **Later**).
+- **A profile page** shows a warning row ("Auto-updates are off until the one-time setup is done", with **Set Up…**) on desktop profiles while setup is missing. It has the color picker (recolor takes seconds, no rebuild), **Open**, **Move to New Layout** (only for profiles that still use a launcher, see [Where the apps live](#where-the-apps-live)), **Fix Dock** (only when the Dock pins an old launcher, a hidden copy or a dead pin), **Rebuild**, **Check**, **Link Sign-in** / **Back to Main** (sends `claude://` sign-in links to the profile for a while, then back), **Copy Command** (the `claude-<slug>` command), **Remove** (keeps data and history unless you tick the delete boxes), the folders that auto-select the profile, and its Claude Code projects.
 - **Adopt banner.** If the app finds a copy you built by hand earlier (a `Claude <Name>.app` with its own data folder), it shows a banner "Found existing copy" on Home. **Adopt** manages it here without rebuilding or changing it; **Not Now** hides the banner.
 - **Project migration.** In a profile, **Add Projects** lists Claude Code projects that have history in other config folders. For the ones you tick, choose **Share** (a symlink: both config folders see the same history from now on), **Move** (the history leaves the old config folder) or **Copy** (an independent copy). You can also add each project folder to the profile's folders so `claude` picks the profile there. Quit Claude Code sessions in those projects first.
 - **Setup & Settings.**
   - **Updates**: the current version, when the last check ran, **Check Now**, **Check automatically** and **Install updates automatically**. See [Updating Claude Profiles](#updating-claude-profiles).
   - **Command-line tool**: **Install** (or **Update**) copies the tool bundled in the app to `~/.local/share/claude-profiles` and links `~/.local/bin/claude-profiles`, so `claude-profiles` works in Terminal.
   - **Shell integration**: a toggle that adds (or removes) one marked line in `~/.zshrc` (or `~/.bashrc`) that defines `claude`, `claude-default` and `claude-<profile>`. It warns about other definitions of `claude` that would override it.
-  - **Auto-rebuild and signing**: the status of the signing identity, the auto-rebuild agent and Claude.app. **Set Up** installs the command-line tool and opens Terminal once to run `setup`; you type your login password there, and the app never sees it.
+  - **One-time setup**: shown at the very top of Setup & Settings while setup is incomplete, with the same explanation as the Home banner; once done, the same button stays in the section below.
+  - **Auto-rebuild and signing**: the status of the signing identity, the auto-rebuild agent and Claude.app. **Set Up…** installs the command-line tool and opens Terminal once to run `setup`; you type your login password there, and the app never sees it.
   - **Old LaunchAgents**: lists agents from earlier hand-made setups that also watch Claude.app. **Disable** unloads one and renames its file to `.disabled`; nothing is deleted.
   - **Files**: the settings folder (`~/.config/claude-profiles`), with a button that reveals it in Finder.
 
@@ -67,7 +75,7 @@ claude-profiles check work
 claude-profiles shell-init install
 ```
 
-The wizard (`claude-profiles new` without flags) asks for the name, the color, and whether the profile is for the desktop app, the CLI or both. It also scans for existing Claude data and Claude Code history and lets you adopt them or link individual projects. Then pin the new `Claude <Name>` to the Dock and run `claude-profiles setup` once in Terminal (see [Updates and auto-rebuild](#updates-and-auto-rebuild)).
+The wizard (`claude-profiles new` without flags) asks for the name, the color, and whether the profile is for the desktop app, the CLI or both. It also scans for existing Claude data and Claude Code history and lets you adopt them or link individual projects. Then pin the new `Claude <Name>` to the Dock and run `claude-profiles setup` once in Terminal. That is step 2 of the [quick start](#quick-start): without it, profiles do not follow Claude updates and macOS re-prompts after every rebuild (see [Updates and auto-rebuild](#updates-and-auto-rebuild)).
 
 ## Path 3: ask Claude Code
 
@@ -181,7 +189,7 @@ The log is `~/Library/Logs/claude-profiles.log`.
 
 ### Stable signing
 
-Ad-hoc signatures change on every rebuild, so macOS would ask again for Keychain access ("Claude Safe Storage") and privacy permissions after each Claude update. `setup` creates a self-signed code-signing identity (default name `Claude Profiles Signing`) in your login keychain, trusts it for code signing and lets `codesign` use it without prompts. Rebuilds then keep the same designated requirement and macOS stops asking. `setup` is interactive because it needs your login password; it must be run by you in Terminal. It is optional: without it everything works, with re-prompts after each rebuild.
+Ad-hoc signatures change on every rebuild, so macOS would ask again for Keychain access ("Claude Safe Storage") and privacy permissions after each Claude update. `setup` creates a self-signed code-signing identity (default name `Claude Profiles Signing`) in your login keychain, trusts it for code signing and lets `codesign` use it without prompts. Rebuilds then keep the same designated requirement and macOS stops asking. `setup` is interactive because it needs your login password; it must be run by you in Terminal. Treat it as part of the install: without it profiles are ad-hoc signed and macOS asks again after each rebuild, and without the agent they stay on the old Claude version until you rebuild by hand.
 
 The identity is chosen per profile: the one set with `set <slug> sign-identity` (or `adopt --identity`), else the one that already signs the copy's nested code, else the global one from `setup`, else ad-hoc. If the chosen identity cannot sign (locked keychain), `build`, `recolor` and `launcher` stop instead of mixing an ad-hoc outer signature with identity-signed helpers. Details: [docs/how-it-works.md](docs/how-it-works.md).
 

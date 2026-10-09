@@ -16,6 +16,14 @@ struct ContentView: View {
                 NoticeStack()
                 DetailRouter()
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .alert(SetupCopy.followUpTitle, isPresented: $model.showsSetupFollowUp) {
+                        Button("Set Up…") {
+                            Task { await model.startSetup() }
+                        }
+                        Button("Later", role: .cancel) {}
+                    } message: {
+                        Text(SetupCopy.explanation + "\n\n" + SetupCopy.passwordNote)
+                    }
                 LogPanel()
             }
         }

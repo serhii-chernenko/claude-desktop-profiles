@@ -27,6 +27,7 @@ struct ProfileCardModel: Identifiable, Hashable {
     let kind: String
     let chips: [StatusChip]
     let action: CardAction
+    var checksClaudeUpdates = false
 
     var id: SidebarItem { item }
 }
@@ -88,7 +89,8 @@ enum HomeCards {
             usesSymbolGlyph: true,
             kind: "Your regular Claude",
             chips: chips,
-            action: installed ? .open(sourcePath) : .unavailable
+            action: installed ? .open(sourcePath) : .unavailable,
+            checksClaudeUpdates: installed
         )
     }
 
@@ -153,6 +155,62 @@ enum SetupState: Hashable {
     case unknown
 }
 
+enum SetupCompletion: Hashable {
+    case complete
+    case incomplete
+    case unknown
+}
+
+enum StepMark: Hashable {
+    case done
+    case pending
+    case neutral
+}
+
+struct HowItWorksStep: Identifiable, Hashable {
+    let number: Int
+    let title: String
+    let text: String
+    let mark: StepMark
+
+    var id: Int { number }
+}
+
+enum HowItWorks {
+    static func setupMark(_ status: StatusSummary?) -> StepMark {
+        switch SetupStatus.completion(status) {
+        case .complete: return .done
+        case .incomplete: return .pending
+        case .unknown: return .neutral
+        }
+    }
+
+    static func steps(status: StatusSummary?) -> [HowItWorksStep] {
+        [
+            HowItWorksStep(number: 1, title: "Create a profile", text: "Give it a name and a color.", mark: .neutral),
+            HowItWorksStep(number: 2, title: "One-time setup", text: "Auto-updates and no repeated permission prompts.", mark: setupMark(status)),
+            HowItWorksStep(number: 3, title: "Open it like any app", text: "Start it from the Dock or Spotlight and sign in.", mark: .neutral),
+            HowItWorksStep(number: 4, title: "Optional: Terminal", text: "Turn on Terminal integration so `claude` picks the profile by folder.", mark: .neutral),
+        ]
+    }
+}
+
+enum SetupCopy {
+    static let actionTitle = "Set up auto-rebuild & stable signing"
+    static let bannerTitle = "Finish the one-time setup (about 1 minute)"
+    static let explanation = "Without it, profiles stay on the old Claude version after Claude updates, and macOS asks for Keychain and permissions again after every rebuild."
+    static let firstProfileNudge = "Do it now so your first profile is set up right."
+    static let agentReason = "The auto-rebuild agent notices when Claude updates and rebuilds your profiles that are not running, so they follow the new version."
+    static let certificateReason = "The stable signing certificate lives in your login keychain. It gives every rebuild the same identity, so macOS remembers your Keychain and permission choices."
+    static let passwordNote = "Terminal opens once because macOS asks for your login password there. This app never handles passwords."
+    static let followUpTitle = "Profile created. Finish the one-time setup now?"
+    static let detailWarning = "Auto-updates are off until the one-time setup is done"
+
+    static func bannerBody(hasProfiles: Bool) -> String {
+        hasProfiles ? explanation : explanation + " " + firstProfileNudge
+    }
+}
+
 struct SetupItem: Identifiable, Hashable {
     let anchor: String
     let title: String
@@ -175,6 +233,20 @@ enum SetupStatus {
     static func identityOK(_ status: StatusSummary?) -> Bool? {
         guard let present = status?.identityPresent else { return nil }
         return present && (status?.identityUsable ?? false)
+    }
+
+    static func agentOK(_ status: StatusSummary?) -> Bool? {
+        status?.agentLoaded
+    }
+
+    static func completion(_ status: StatusSummary?) -> SetupCompletion {
+        let results = [agentOK(status), identityOK(status)]
+        if results.contains(false) { return .incomplete }
+        return results.allSatisfy { $0 == true } ? .complete : .unknown
+    }
+
+    static func needsSetup(_ status: StatusSummary?) -> Bool {
+        completion(status) == .incomplete
     }
 
     private static func state(_ value: Bool?) -> SetupState {

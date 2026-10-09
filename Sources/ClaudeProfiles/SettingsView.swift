@@ -35,6 +35,9 @@ struct SettingsView: View {
                         .foregroundStyle(.orange)
                 }
             }
+            if model.setupNeeded {
+                setupSection
+            }
             updatesSection
             commandLineSection
             shellSection
@@ -52,6 +55,30 @@ struct SettingsView: View {
             Button("Cancel", role: .cancel) {}
         } message: { agent in
             Text("It is unloaded and its file is renamed to \((agent.plist as NSString).lastPathComponent).disabled. Nothing is deleted; rename it back to restore it.")
+        }
+    }
+
+    private var setupActionRow: some View {
+        ActionRow(title: SetupCopy.actionTitle,
+                  caption: model.setupNeeded ? SetupCopy.explanation : SetupCopy.passwordNote,
+                  systemImage: "wand.and.stars") {
+            Button("Set Up…") {
+                Task { await model.startSetup() }
+            }
+            .buttonStyle(.borderedProminent)
+            .disabled(model.isBusy || model.cliMissing)
+        }
+    }
+
+    private var setupSection: some View {
+        Section {
+            setupActionRow
+        } header: {
+            Text("One-time setup")
+        } footer: {
+            Text(SetupCopy.passwordNote)
+                .font(.caption)
+                .foregroundStyle(.secondary)
         }
     }
 
@@ -171,13 +198,8 @@ struct SettingsView: View {
             LabeledContent("Claude.app") {
                 StatusLabel(ok: model.sourceAppPresent ? status?.sourceTeamOK : false, text: sourceText)
             }
-            ActionRow(title: "Set up auto-rebuild & stable signing",
-                      caption: "Opens Terminal to run setup once. It asks for your login password there; this app never sees it.",
-                      systemImage: "lock.shield") {
-                Button("Set Up…") {
-                    Task { await model.startSetup() }
-                }
-                .disabled(model.isBusy || model.cliMissing)
+            if !model.setupNeeded {
+                setupActionRow
             }
         } header: {
             Text("Auto-rebuild and signing")
