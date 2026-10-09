@@ -61,9 +61,9 @@ enum HomeCards {
 
     static func kind(isDesktop: Bool, cli: Bool) -> String {
         switch (isDesktop, cli) {
-        case (true, true): return "Desktop app + CLI"
+        case (true, true): return "Desktop app + Terminal"
         case (true, false): return "Desktop app"
-        default: return "Claude Code (CLI)"
+        default: return "Terminal only"
         }
     }
 

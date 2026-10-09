@@ -119,10 +119,10 @@ struct CreateProfileSheet: View {
                     .toggleStyle(.switch)
                     .disabled(!model.sourceAppPresent)
             }
-            ActionRow(title: "Claude Code (CLI)",
-                      caption: "Gives claude-\(slug.isEmpty ? "name" : slug) its own config folder: sessions, settings and CLI sign-in.",
+            ActionRow(title: "Terminal command",
+                      caption: "Adds claude-\(slug.isEmpty ? "name" : slug) in Terminal and picks this profile automatically in its folders.",
                       systemImage: "terminal") {
-                Toggle("Claude Code", isOn: $cli)
+                Toggle("Terminal command", isOn: $cli)
                     .labelsHidden()
                     .toggleStyle(.switch)
             }
@@ -134,6 +134,17 @@ struct CreateProfileSheet: View {
         } header: {
             Text("Use it for")
         }
+    }
+
+    private var configFolderCaption: String {
+        let command = "claude-\(slug.isEmpty ? "name" : slug)"
+        let users: String
+        switch (desktop, cli) {
+        case (true, true): users = "Used by the Code tab of this profile's app and by \(command) in Terminal"
+        case (true, false): users = "Used by the Code tab of this profile's app"
+        default: users = "Used by \(command) in Terminal"
+        }
+        return users + ": session history, settings and Claude Code sign-in. Picking ~/.claude shares them with Main Claude."
     }
 
     private var storageSection: some View {
@@ -158,7 +169,7 @@ struct CreateProfileSheet: View {
                         Text("\(tildePath(config.path)) (\(config.projectCount) projects)").tag(config.path)
                     }
                 }
-                Text("Holds session history, settings and the CLI sign-in. Sharing ~/.claude means sharing history with Main Claude.")
+                Text(configFolderCaption)
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }

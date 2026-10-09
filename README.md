@@ -6,7 +6,7 @@ Run several Claude accounts side by side on macOS, each with its own login, its 
 - **Claude Code (CLI)**: every profile has its own `CLAUDE_CONFIG_DIR`. A shell hook picks the profile from the folder you are in.
 - **Native app, no dependencies**: Claude Profiles is a SwiftUI window over a zsh command-line tool. It needs only what ships with macOS (zsh, `osascript`, PlistBuddy, `codesign`, `iconutil`, `ditto`, `security`, `launchctl`). No Homebrew packages, no Python.
 
-Requires macOS 13 or newer. Desktop profiles also need an installed `/Applications/Claude.app`; Claude Code (CLI) profiles work without it.
+Requires macOS 13 or newer. Desktop profiles also need an installed `/Applications/Claude.app`; terminal-only profiles work without it.
 
 ## Three ways to use it
 

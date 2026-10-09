@@ -89,8 +89,8 @@ struct ProfileSidebarRow: View {
     private var kind: String {
         switch (profile.isDesktop, cli) {
         case (true, .some(false)): return "Desktop app"
-        case (true, _): return "Desktop app + CLI"
-        default: return "Claude Code (CLI) only"
+        case (true, _): return "Desktop app + Terminal"
+        default: return "Terminal only"
         }
     }
 }

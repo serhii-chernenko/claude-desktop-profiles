@@ -162,7 +162,7 @@ struct NoticeStack: View {
             if model.hasLoaded && !model.sourceAppPresent {
                 NoticeBar(systemImage: "info.circle.fill", tint: .orange,
                           title: "Claude.app was not found in Applications",
-                          text: "Claude Code (CLI) profiles still work. Desktop profiles need Claude.app installed to build or rebuild.")
+                          text: "Terminal-only profiles still work. Desktop profiles need Claude.app installed to build or rebuild.")
             }
         }
     }
