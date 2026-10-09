@@ -29,3 +29,4 @@ Utility to run several Claude accounts on macOS (desktop copies with their own d
 - Check scripts with `zsh -n`. Never launch the built app from automation (it shows windows); `ClaudeProfiles --self-test` is headless and runs as part of `scripts/build-app.sh`.
 - The CLI's `--plain` output is the contract the app parses: change it in `bin/claude-profiles` and `Sources/ClaudeProfiles/PlainParser.swift` together.
 - Build output goes to `dist/` only: `zsh scripts/build-app.sh`, `zsh scripts/build-dmg.sh`.
+- `scripts/build-app.sh` embeds Sparkle, which `scripts/fetch-sparkle.sh` downloads once (the first build needs network). Releases are prepared locally with `scripts/prepare-release.sh`, never by CI: the update signing key stays in the maintainer's login keychain.

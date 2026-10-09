@@ -2,9 +2,14 @@ import SwiftUI
 
 struct SidebarView: View {
     @EnvironmentObject var model: AppModel
+    @EnvironmentObject var updater: UpdaterModel
 
     var body: some View {
         List(selection: $model.selection) {
+            Section {
+                Label("Home", systemImage: "house")
+                    .tag(SidebarItem.home)
+            }
             Section("Profiles") {
                 ForEach(model.profiles) { profile in
                     ProfileSidebarRow(profile: profile, cli: model.details[profile.slug]?.flag("cli"))
@@ -25,7 +30,7 @@ struct SidebarView: View {
                             .foregroundStyle(.secondary)
                     }
                 } icon: {
-                    Image(systemName: "house")
+                    Image(systemName: "person.crop.circle")
                 }
                 .tag(SidebarItem.main)
                 Label("Setup & Settings", systemImage: "gearshape")
@@ -47,6 +52,17 @@ struct SidebarView: View {
                 .padding(.vertical, 10)
                 .disabled(model.isBusy || model.cliMissing)
                 .help("Create a profile (⌘N)")
+                Button {
+                    AboutWindowController.shared.show(updater: updater)
+                } label: {
+                    Label("About", systemImage: "info.circle")
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                .buttonStyle(.borderless)
+                .foregroundStyle(.secondary)
+                .padding(.horizontal, 14)
+                .padding(.bottom, 10)
+                .help("About Claude Profiles")
             }
         }
     }

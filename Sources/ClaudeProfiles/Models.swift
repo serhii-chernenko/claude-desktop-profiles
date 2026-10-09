@@ -164,6 +164,7 @@ enum LinkMode: String, CaseIterable, Identifiable {
 }
 
 enum SidebarItem: Hashable {
+    case home
     case main
     case profile(String)
     case settings

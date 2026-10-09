@@ -24,16 +24,21 @@ Requires macOS 13 or newer. Desktop profiles also need an installed `/Applicatio
 
 ### The window
 
-- **Sidebar.** Your profiles, then **Main Claude** (your regular app and `~/.claude`, read-only: profiles never change it) and **Setup & Settings**. **New Profile** is at the bottom (or press ⌘N).
+- **Home.** The window opens on **Home**: how it works in a few steps, a card for each profile (name, kind, running and up-to-date state, an **Open** button, and a click-through to the profile page) and a setup status row (auto-rebuild agent, signing identity, command-line tool, shell integration; click one to jump to its settings), so you can see at a glance what is left to do.
+- **Sidebar.** **Home** at the top, then your profiles, **Main Claude** (your regular app and `~/.claude`, read-only: profiles never change it) and **Setup & Settings**. **New Profile** (or press ⌘N) and **About** are at the bottom.
 - **Create a profile.** Give it a name, pick an **icon color** with the color picker (the tint is applied to the app's Dock icon), and choose what it is for: the desktop app, Claude Code, or both. You can reuse an existing data folder (which keeps its sign-in and chats) or config folder, bring existing projects along (share, move or copy, see below) and list folders that select the profile automatically.
 - **A profile page** has the color picker (recolor takes seconds, no rebuild), **Open**, **Move to New Layout** (only for profiles that still use a launcher, see [Where the apps live](#where-the-apps-live)), **Fix Dock** (only when the Dock pins an old launcher, a hidden copy or a dead pin), **Rebuild**, **Check**, **Link Sign-in** / **Back to Main** (sends `claude://` sign-in links to the profile for a while, then back), **Copy Command** (the `claude-<slug>` command), **Remove** (keeps data and history unless you tick the delete boxes), the folders that auto-select the profile, and its Claude Code projects.
-- **Adopt banner.** If the app finds a copy you built by hand earlier (a `Claude <Name>.app` with its own data folder), it shows a banner "Found existing copy". **Adopt** manages it here without rebuilding or changing it; **Not Now** hides the banner.
+- **Adopt banner.** If the app finds a copy you built by hand earlier (a `Claude <Name>.app` with its own data folder), it shows a banner "Found existing copy" on Home. **Adopt** manages it here without rebuilding or changing it; **Not Now** hides the banner.
 - **Project migration.** In a profile, **Add Projects** lists Claude Code projects that have history in other config folders. For the ones you tick, choose **Share** (a symlink: both config folders see the same history from now on), **Move** (the history leaves the old config folder) or **Copy** (an independent copy). You can also add each project folder to the profile's folders so `claude` picks the profile there. Quit Claude Code sessions in those projects first.
 - **Setup & Settings.**
+  - **Updates**: the current version, when the last check ran, **Check Now**, **Check automatically** and **Install updates automatically**. See [Updating Claude Profiles](#updating-claude-profiles).
   - **Command-line tool**: **Install** (or **Update**) copies the tool bundled in the app to `~/.local/share/claude-profiles` and links `~/.local/bin/claude-profiles`, so `claude-profiles` works in Terminal.
   - **Shell integration**: a toggle that adds (or removes) one marked line in `~/.zshrc` (or `~/.bashrc`) that defines `claude`, `claude-default` and `claude-<profile>`. It warns about other definitions of `claude` that would override it.
-  - **Updates and signing**: the status of the signing identity, the auto-rebuild agent and Claude.app. **Set Up** installs the command-line tool and opens Terminal once to run `setup`; you type your login password there, and the app never sees it.
+  - **Auto-rebuild and signing**: the status of the signing identity, the auto-rebuild agent and Claude.app. **Set Up** installs the command-line tool and opens Terminal once to run `setup`; you type your login password there, and the app never sees it.
   - **Old LaunchAgents**: lists agents from earlier hand-made setups that also watch Claude.app. **Disable** unloads one and renames its file to `.disabled`; nothing is deleted.
+  - **Files**: the settings folder (`~/.config/claude-profiles`), with a button that reveals it in Finder.
+
+- **About.** **About Claude Profiles** in the app menu opens a window with the version and links to the project (also reachable from **About** at the bottom of the sidebar).
 
 Every button runs a `claude-profiles` command: see [What the app does](#what-the-app-does) and the [command reference](#commands). **Show Log** displays the output.
 
@@ -150,9 +155,17 @@ While a launcher-mode profile runs, the Dock shows two icons (the pinned launche
 
 **Moving to self mode.** Run `claude-profiles migrate-layout <slug>` (or **Move to New Layout** in the app); a plain `build` does the same. Quit the profile first. The copy is rebuilt from the current Claude.app with the profile's signing identity, so with the identity from `setup` Keychain and privacy permissions carry over. It replaces the launcher at `/Applications/Claude <Name>.app`, the hidden copy (and the old `… Launcher.app` of very old installs) is removed, and your existing Dock pin is refreshed to point at the app. The data folder and history are not touched. It refuses while an old LaunchAgent references the copy or Claude.app: disable it first, see `legacy-agents`. `claude-profiles dock <slug> fix` repeats the Dock repair at any time; **Fix Dock** in the app appears when `check` would warn. To go back, run `claude-profiles build <slug> --mode launcher`.
 
+## Updating Claude Profiles
+
+While the app is open it checks for a new version about once a day. To check right away, choose **Check for Updates…** in the app menu, or press **Check Now** under **Setup & Settings → Updates**, which also shows the current version and the time of the last check and has two switches: **Check automatically** and **Install updates automatically** (off by default, so nothing is installed until you agree).
+
+Each update is announced in a feed that must be signed, and the downloaded archive is verified against an Ed25519 signature before it is unpacked. The app is still ad-hoc signed and not notarized (see [First launch](#first-launch-gatekeeper)): the signature is what proves an update comes from this project, not an Apple certificate. The app only contacts GitHub to read the feed and download an update, and sends no information about your Mac.
+
+On the next launch of the app, if the command-line tool was installed and differs from the bundled one, the app refreshes the installed copy in `~/.local/share/claude-profiles` by itself, so the LaunchAgent and the shell hook never keep running an outdated one. It only does so when the bundled version is the same or newer, so an older app never downgrades the installed tool, and it logs what it decided in the log panel.
+
 ## After you pull or update the repo
 
-The LaunchAgent and the shell hook run the installed copy of the tool in `~/.local/share/claude-profiles`, not the files in your checkout or inside the app. After you pull the repo or update **Claude Profiles.app**, run `claude-profiles install-cli` (or press **Update** under Settings, Command-line tool) so the installed copy matches. `check` and `status` warn when it is out of date, and `status --plain` has a `cli_current` row (`0` when it differs).
+The LaunchAgent and the shell hook run the installed copy of the tool in `~/.local/share/claude-profiles`, not the files in your checkout or inside the app. The app refreshes that copy itself on its next launch after an update (see [Updating Claude Profiles](#updating-claude-profiles)). After you pull the repo, or when you replace **Claude Profiles.app** by hand, run `claude-profiles install-cli` (or press **Update** under Settings, Command-line tool) so the installed copy matches. `check` and `status` warn when it is out of date, and `status --plain` has a `cli_current` row (`0` when it differs).
 
 ## Updates and auto-rebuild
 
@@ -204,6 +217,8 @@ The hook reads only `~/.config/claude-profiles/rules.tsv`, so it adds no measura
 | `CLAUDE_PROFILES_AGENTS_DIR` | Folder scanned for old LaunchAgents (default `~/Library/LaunchAgents`). For tests |
 | `CLAUDE_PROFILES_NO_URL_SET` | When set, the CLI never changes the `claude://` handler (for tests); it only prints what it would have done |
 | `CLAUDE_PROFILES_MODE` | Shell hook only: `auto`, `warn` or `off`, overrides `CLI_RULE_MODE` |
+| `CLAUDE_ICON_SOURCE` | Build time only, read by `scripts/make-icon.swift`: a path to an app or icon file whose white glyph is extracted and drawn on the two tiles of the Claude Profiles app icon (default `/Applications/Claude.app`). The glyph is rendered into a temporary file during the build and nothing from it is stored in the repository |
+| `ICON_GLYPH` | Build time only: `generic` skips the extraction and draws the built-in starburst. This is also what happens automatically when no source is found, as on CI runners without Claude.app |
 
 The `claude-profiles.bak` backups: when a project is linked, edited `.claude.json` files are first copied to `<file>.claude-profiles.bak`.
 
@@ -248,6 +263,27 @@ More background on every design decision is in [docs/how-it-works.md](docs/how-i
 ## What CI covers
 
 CI syntax-checks the zsh scripts, builds the app and runs `ClaudeProfiles --self-test`, which exercises the CLI against a temporary home. The runners have no Claude.app, so nothing in CI builds, patches or launches a real profile copy. The `app.asar` patch is validated on your machine at build time (`asar_validate`, then a verification of the patched archive), with an automatic fallback to launcher mode when a check fails.
+
+## Releasing
+
+For maintainers. Releases are prepared on the maintainer Mac, not in GitHub Actions: the private key that signs the updates stays in the login keychain (account `io.github.claude-desktop-profiles`) and is never stored in the repository or in CI.
+
+1. Bump `VERSION` and update `Resources/ReleaseNotes.html` (it must start with `<h2>Claude Profiles <version></h2>`; it becomes the update's release notes). `CFBundleVersion` is derived from `VERSION` as `major*10000 + minor*100 + patch`, so it only increases; minor and patch must stay below 100.
+2. Run `scripts/prepare-release.sh`. It refuses to continue unless the keychain key matches `SUPublicEDKey` in `Resources/Info.plist`, builds the app and the DMG, zips the app, generates and verifies the signed `appcast.xml` and writes `SHA256SUMS.txt`, all in `dist/`. `STOP_AFTER_APPCAST=1` stops after the appcast, as a dry run.
+3. Review `dist/`, push the release commit, then run the `gh release create v<version> ...` command the script prints. It uploads the DMG, the ZIP, `appcast.xml` and `SHA256SUMS.txt` together. Keep the assets of older releases: installed copies read `appcast.xml` from the latest release.
+
+GitHub Actions cannot publish: it has no access to the key. Pushing a `v*` tag only runs a check that the tag matches `VERSION` and that the app and the DMG still build.
+
+The first build needs network access: `scripts/fetch-sparkle.sh` downloads Sparkle 2.10.0 once into `.build/` and checks its pinned SHA-256. CI needs network for the same reason.
+
+**Back up the update key.** Export it once and keep it in a password manager or on encrypted offline storage. Never commit it.
+
+```sh
+generate_keys --account io.github.claude-desktop-profiles -x ~/update-key.backup
+generate_keys --account io.github.claude-desktop-profiles -f ~/update-key.backup
+```
+
+`generate_keys` is in Sparkle's `bin/` (after the first build: `.build/sparkle-2.10.0/bin`). The first command exports the key to a file (delete it once it is stored safely), the second imports it on a new Mac. If the key is lost, installed copies can no longer verify updates and cannot update themselves: publish a new key in `Resources/Info.plist` and ask users to reinstall from the DMG.
 
 ## Uninstall
 

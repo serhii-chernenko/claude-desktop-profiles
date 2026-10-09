@@ -60,6 +60,7 @@ struct ContentView: View {
         }
         .task {
             await model.refresh()
+            await model.updateInstalledCLIIfStale()
         }
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
             Task { await model.autoRefresh() }
@@ -100,6 +101,8 @@ struct DetailRouter: View {
 
     var body: some View {
         switch model.selection {
+        case .home:
+            HomeView()
         case .main:
             MainClaudeView()
         case .settings:
@@ -112,93 +115,13 @@ struct DetailRouter: View {
                 placeholder
             }
         case .none:
-            placeholder
+            HomeView()
         }
     }
 
-    @ViewBuilder
     private var placeholder: some View {
-        if !model.hasLoaded {
-            ProgressView("Loading profiles…")
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-        } else if model.profiles.isEmpty {
-            EmptyProfilesView()
-        } else {
-            Text("Select a profile in the sidebar")
-                .foregroundStyle(.secondary)
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-        }
-    }
-}
-
-struct EmptyProfilesView: View {
-    @EnvironmentObject var model: AppModel
-
-    var body: some View {
-        ScrollView {
-            VStack(spacing: 22) {
-                ProfileStackGlyph()
-                    .frame(width: 92, height: 92)
-                VStack(spacing: 8) {
-                    Text("No profiles yet")
-                        .font(.title.weight(.semibold))
-                    Text("A profile is a second Claude account on this Mac. It runs side by side with your regular Claude, with its own sign-in, and nothing is shared between them.")
-                        .font(.body)
-                        .foregroundStyle(.secondary)
-                        .multilineTextAlignment(.center)
-                        .frame(maxWidth: 460)
-                }
-                HStack(alignment: .top, spacing: 14) {
-                    FeatureTile(systemImage: "app.badge", title: "Own desktop app",
-                                text: "A tinted copy of Claude with its own Dock icon, one app per profile.")
-                    FeatureTile(systemImage: "person.crop.circle.badge.checkmark", title: "Own sign-in",
-                                text: "Separate account, chats and settings. Your main Claude is untouched.")
-                    FeatureTile(systemImage: "terminal", title: "Own Claude Code history",
-                                text: "claude-<name> in Terminal, picked automatically per folder.")
-                }
-                .frame(maxWidth: 640)
-                VStack(spacing: 8) {
-                    Button {
-                        model.sheet = .create
-                    } label: {
-                        Label("Create your first profile", systemImage: "plus")
-                            .padding(.horizontal, 8)
-                    }
-                    .buttonStyle(.borderedProminent)
-                    .controlSize(.large)
-                    .disabled(model.isBusy || model.cliMissing)
-                    Text("or press ⌘N")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-            }
-            .padding(40)
-            .frame(maxWidth: .infinity)
-        }
-    }
-}
-
-struct FeatureTile: View {
-    let systemImage: String
-    let title: String
-    let text: String
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Image(systemName: systemImage)
-                .font(.title2)
-                .foregroundStyle(Color.accentColor)
-            Text(title)
-                .font(.headline)
-            Text(text)
-                .font(.callout)
-                .foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(14)
-        .background(RoundedRectangle(cornerRadius: 10).fill(Color.primary.opacity(0.04)))
-        .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(Color.primary.opacity(0.08)))
+        ProgressView("Loading profiles…")
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 }
 
@@ -240,21 +163,6 @@ struct NoticeStack: View {
                 NoticeBar(systemImage: "info.circle.fill", tint: .orange,
                           title: "Claude.app was not found in Applications",
                           text: "Claude Code (CLI) profiles still work. Desktop profiles need Claude.app installed to build or rebuild.")
-            }
-            ForEach(model.visibleCandidates) { candidate in
-                NoticeBar(systemImage: "shippingbox.fill", tint: .accentColor,
-                          title: "Found existing copy “\(candidate.appDisplayName)”",
-                          text: "It was made by hand earlier. Adopt it to manage it here without rebuilding or changing it.") {
-                    Button("Not Now") {
-                        model.dismissedCandidates.insert(candidate.id)
-                    }
-                    .buttonStyle(.borderless)
-                    Button("Adopt…") {
-                        model.sheet = .adopt(candidate)
-                    }
-                    .buttonStyle(.borderedProminent)
-                    .disabled(model.isBusy)
-                }
             }
         }
     }

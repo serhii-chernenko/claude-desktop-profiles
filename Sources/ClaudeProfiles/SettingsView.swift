@@ -4,6 +4,7 @@ struct SettingsView: View {
     static let legacyAgentsAnchor = "legacy-agents"
 
     @EnvironmentObject var model: AppModel
+    @EnvironmentObject var updater: UpdaterModel
     @State private var agentToDisable: LegacyAgent?
 
     private var status: StatusSummary? { model.status }
@@ -34,11 +35,12 @@ struct SettingsView: View {
                         .foregroundStyle(.orange)
                 }
             }
+            updatesSection
             commandLineSection
             shellSection
             rebuildSection
             legacySection
-            aboutSection
+            filesSection
         }
         .formStyle(.grouped)
         .confirmationDialog("Disable \(agentToDisable?.label ?? "agent")?",
@@ -53,6 +55,41 @@ struct SettingsView: View {
         }
     }
 
+    private var updatesSection: some View {
+        Section {
+            LabeledContent("Version", value: AppInfo.versionDescription)
+            LabeledContent("Last checked", value: updater.lastCheckDate.map(Self.lastCheckFormatter.string(from:)) ?? "Never")
+            ActionRow(title: "Check for updates",
+                      caption: "Looks for a newer Claude Profiles on GitHub. Updates are verified with a signature before they are installed.",
+                      systemImage: "arrow.down.circle") {
+                Button("Check Now") { updater.checkForUpdates() }
+                    .disabled(!updater.canCheckForUpdates)
+            }
+            Toggle("Check automatically", isOn: Binding(
+                get: { updater.automaticallyChecks },
+                set: { updater.setAutomaticallyChecks($0) }
+            ))
+            Toggle("Install updates automatically", isOn: Binding(
+                get: { updater.automaticallyDownloads },
+                set: { updater.setAutomaticallyDownloads($0) }
+            ))
+            .disabled(!updater.automaticallyChecks)
+        } header: {
+            Text("Updates")
+        } footer: {
+            Text("While the app is open it checks about once a day. No system information is sent.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    private static let lastCheckFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.dateStyle = .medium
+        formatter.timeStyle = .short
+        return formatter
+    }()
+
     private var commandLineSection: some View {
         Section {
             ActionRow(title: "claude-profiles command",
@@ -63,6 +100,7 @@ struct SettingsView: View {
                 }
                 .disabled(model.isBusy || model.cliMissing)
             }
+            .id(SetupStatus.commandLineAnchor)
             LabeledContent("Status") {
                 StatusLabel(ok: commandLineOK,
                             text: commandLineStatusText)
@@ -72,10 +110,7 @@ struct SettingsView: View {
         }
     }
 
-    private var commandLineOK: Bool? {
-        guard let installed = status?.cliInstalled else { return nil }
-        return installed && status?.cliCurrent != false
-    }
+    private var commandLineOK: Bool? { SetupStatus.commandLineOK(status) }
 
     private var commandLineNeedsUpdate: Bool {
         status?.cliInstalled == true || status?.cliCurrent == false
@@ -100,6 +135,7 @@ struct SettingsView: View {
                 .toggleStyle(.switch)
                 .disabled(model.isBusy || model.shell == nil)
             }
+            .id(SetupStatus.shellAnchor)
             if let conflicts = model.shell?.conflicts, !conflicts.isEmpty {
                 VStack(alignment: .leading, spacing: 6) {
                     Label("Other definitions of claude may override the profile switch:", systemImage: "exclamationmark.triangle.fill")
@@ -128,6 +164,7 @@ struct SettingsView: View {
             LabeledContent("Signing identity") {
                 StatusLabel(ok: identityOK, text: identityText)
             }
+            .id(SetupStatus.rebuildAnchor)
             LabeledContent("Auto-rebuild agent") {
                 StatusLabel(ok: status?.agentLoaded, text: status?.agentLoaded == true ? "Loaded" : "Not installed")
             }
@@ -143,7 +180,7 @@ struct SettingsView: View {
                 .disabled(model.isBusy || model.cliMissing)
             }
         } header: {
-            Text("Updates and signing")
+            Text("Auto-rebuild and signing")
         } footer: {
             Text("When Claude updates, the agent rebuilds every profile that is not running. A stable signing identity stops Keychain from asking again after each rebuild.")
                 .font(.caption)
@@ -151,10 +188,7 @@ struct SettingsView: View {
         }
     }
 
-    private var identityOK: Bool? {
-        guard let present = status?.identityPresent else { return nil }
-        return present && (status?.identityUsable ?? false)
-    }
+    private var identityOK: Bool? { SetupStatus.identityOK(status) }
 
     private var identityText: String {
         let name = status?.identityName ?? "Claude Profiles Signing"
@@ -214,10 +248,9 @@ struct SettingsView: View {
         }
     }
 
-    private var aboutSection: some View {
-        Section("About") {
+    private var filesSection: some View {
+        Section("Files") {
             PathRow(title: "Settings folder", path: status?.home)
-            LabeledContent("Version", value: Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "unknown")
         }
     }
 }

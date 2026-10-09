@@ -152,6 +152,55 @@ enum SelfTest {
         expect(PlainParser.slugify("  My Work Profile! ") == "my-work-profile", "slugify matches the CLI")
         expect(PlainParser.isValidName("Work") && !PlainParser.isValidName(" Work") && !PlainParser.isValidName("a/b"), "name validation")
         expect(Color(hex: "#3a7bd5")?.hexString == "#3a7bd5", "hex color round trip")
+        homeChecks()
+    }
+
+    private static func homeChecks() {
+        expect(MainActor.assumeIsolated { AppModel(runner: nil).selection } == .home, "the app opens on Home")
+
+        let desktopSelf = Profile(slug: "work", name: "Work", color: "#3a7bd5", isDesktop: true, app: "/A/Claude Work.app", configDir: "/h/.claude-work", dataDir: "/h/d")
+        let hidden = Profile(slug: "side", name: "Side", color: nil, isDesktop: true, app: "/A/.hidden/Claude Side.app", configDir: "/h/.claude-side", dataDir: "/h/s")
+        let cliOnly = Profile(slug: "ci", name: "Ci", color: "#2ecc71", isDesktop: false, app: nil, configDir: "/h/.claude-ci", dataDir: nil)
+        let environment = HomeEnvironment(
+            isRunning: { $0 == "/A/Claude Work.app" || $0 == "/Applications/Claude.app" },
+            appVersion: { $0 == "/A/Claude Work.app" ? "1.0 (1)" : "0.9 (1)" },
+            fileExists: { $0 != "/A/Launcher Side.app" }
+        )
+        let details = [
+            "work": PlainParser.profileDetails("slug\twork\ncli\t1\napp\t/A/Claude Work.app\nlauncher\t-\nmode\tself"),
+            "side": PlainParser.profileDetails("slug\tside\ncli\t0\napp\t/A/.hidden/Claude Side.app\nlauncher\t/A/Launcher Side.app\nmode\tlauncher"),
+            "ci": PlainParser.profileDetails("slug\tci\ncli\t1\napp\t-\ndir\t/h/dev\ndir\t/h/other"),
+        ]
+        let status = PlainParser.status("source\t/Applications/Claude.app\t1.0 (1)\t1")
+        let cards = HomeCards.cards(sourcePath: "/Applications/Claude.app", status: status, profiles: [desktopSelf, hidden, cliOnly], details: details, environment: environment)
+        expect(cards.count == 4 && cards.first?.item == .main && cards.map(\.name) == ["Main Claude", "Work", "Side", "Ci"], "home cards list Main Claude first, then every profile")
+        expect(cards[0].chips.map(\.text) == ["Running", "Version 1.0"] && cards[0].action == .open("/Applications/Claude.app"), "main card shows running state and opens Claude.app")
+        expect(cards[1].kind == "Desktop app + CLI" && cards[1].glyph == "W" && cards[1].chips.map(\.text) == ["Running", "Up to date", "Self mode"] && cards[1].action == .open("/A/Claude Work.app"), "self-mode card is running, up to date and opens its app")
+        let sameBuild = HomeCards.card(for: desktopSelf, details: details["work"], sourceVersion: "1.0 (1)", environment: environment)
+        let newerBuild = HomeCards.card(for: desktopSelf, details: details["work"], sourceVersion: "1.0 (2)", environment: environment)
+        expect(sameBuild.chips.map(\.text).contains("Up to date") && newerBuild.chips.map(\.text).contains("Rebuild needed"), "versions compare as the full short (build) string")
+        expect(HomeCards.main(sourcePath: "/Applications/Claude.app", sourceVersion: "1.0 (7)", environment: environment).chips.last?.text == "Version 1.0", "versions display without the build suffix")
+        let loading = HomeCards.card(for: desktopSelf, details: nil, sourceVersion: "1.0 (1)", environment: environment)
+        expect(loading.action == .loading && loading.chips.map(\.text) == ["Loading…"], "a desktop profile whose details are still loading shows a loading state, not a disabled Open")
+        expect(HomeCards.card(for: cliOnly, details: nil, sourceVersion: nil, environment: environment).action == .copyCommand("claude-ci"), "a CLI-only profile can copy its command before its details load")
+        expect(cards[2].kind == "Desktop app" && cards[2].chips.map(\.text) == ["Rebuild needed", "Launcher mode"] && cards[2].action == .unavailable, "launcher card is outdated and cannot open a missing launcher")
+        expect(cards[3].kind == "Claude Code (CLI)" && cards[3].chips.map(\.text) == ["2 folders"] && cards[3].action == .copyCommand("claude-ci"), "CLI-only card copies its command and counts folders")
+        let missingApp = HomeCards.card(for: desktopSelf, details: details["work"], sourceVersion: "1.0", environment: HomeEnvironment(isRunning: { _ in false }, appVersion: { _ in nil }, fileExists: { _ in false }))
+        expect(missingApp.chips.first?.text == "Not built" && missingApp.action == .unavailable, "a profile whose app is missing reads as not built")
+        expect(HomeCards.main(sourcePath: "/x/Claude.app", sourceVersion: nil, environment: HomeEnvironment(isRunning: { _ in false }, appVersion: { _ in nil }, fileExists: { _ in false })).chips.map(\.text) == ["Not installed"], "main card reports a missing Claude.app")
+
+        let good = PlainParser.status("cli_installed\t1\t/h/.local/bin/claude-profiles\ncli_current\t1\nidentity\tSigning\t1\t1\nagent\tlabel\t1")
+        let goodItems = SetupStatus.items(status: good, shell: ShellStatus(installed: true, rcFile: nil, conflicts: []))
+        expect(goodItems.map(\.title) == ["Auto-rebuild agent", "Signing identity", "Command-line tool", "Shell integration"] && goodItems.allSatisfy { $0.state == .ok }, "setup status shows four checkmarks when everything is set up")
+        let stale = PlainParser.status("cli_installed\t1\t/h/.local/bin/claude-profiles\ncli_current\t0\nidentity\tSigning\t1\t0\nagent\tlabel\t0")
+        let staleItems = SetupStatus.items(status: stale, shell: ShellStatus(installed: false, rcFile: nil, conflicts: []))
+        expect(staleItems.map(\.state) == [.warning, .warning, .warning, .warning] && staleItems[2].detail == "Out of date" && staleItems[1].detail == "Needs setup", "setup status warns about each missing piece")
+        expect(SetupStatus.items(status: nil, shell: nil).allSatisfy { $0.state == .unknown }, "setup status stays neutral before the first refresh")
+        expect(CLIUpdatePolicy.decide(bundled: "0.1.0", installed: "0.2.0").shouldInstall == false, "an older app never downgrades a newer installed command-line tool")
+        expect(CLIUpdatePolicy.decide(bundled: "0.2.0", installed: "0.1.9").shouldInstall && CLIUpdatePolicy.decide(bundled: "0.1.0", installed: "0.1.0").shouldInstall, "the installed command-line tool is refreshed when the app is newer or the same version")
+        expect(CLIUpdatePolicy.decide(bundled: "0.10.0", installed: "0.9.0").shouldInstall && !CLIUpdatePolicy.decide(bundled: "0.9.0", installed: "0.10.0").shouldInstall, "command-line tool versions compare numerically")
+        expect(CLIUpdatePolicy.decide(bundled: "0.1.0", installed: nil).shouldInstall && !CLIUpdatePolicy.decide(bundled: nil, installed: "0.1.0").shouldInstall && !CLIUpdatePolicy.decide(bundled: "dev", installed: "0.1.0").shouldInstall, "a missing installed version is updated, an unknown bundled version is left alone")
+        expect(Set(goodItems.map(\.anchor)).count == 3, "setup items link to the command-line, shell and rebuild settings sections")
     }
 
     private static func integrationChecks(script: URL, root: String, home: String, settings: String) throws {

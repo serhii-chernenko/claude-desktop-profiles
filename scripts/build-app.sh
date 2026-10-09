@@ -6,6 +6,9 @@
 #   SIGNING_IDENTITY="Name" zsh scripts/build-app.sh sign with a certificate instead of ad-hoc
 #
 # bin/, lib/ and the version are copied into Contents/Resources/cli/, where the app runs the CLI.
+# Sparkle 2 is downloaded and checksum-verified by scripts/fetch-sparkle.sh, embedded in
+# Contents/Frameworks and signed inside-out (XPC services, Autoupdate, Updater.app, framework, app).
+# CFBundleVersion is major*10000 + minor*100 + patch of the version, so it only ever increases.
 # The native architecture runs --self-test against a temporary CLAUDE_PROFILES_HOME.
 set -euo pipefail
 
@@ -32,24 +35,43 @@ for folder in bin lib; do
   [[ -d $ROOT/$folder ]] || die "Missing $ROOT/$folder"
 done
 
+bundle_build_number() {
+  local core=${1%%[-+]*}
+  [[ $core =~ '^([0-9]+)\.([0-9]+)\.([0-9]+)$' ]] || die "The version must look like 1.2.3 (got \"$1\")."
+  local major=$match[1] minor=$match[2] patch=$match[3]
+  (( minor < 100 && patch < 100 )) || die "Minor and patch versions must stay below 100 (got \"$1\")."
+  print -r -- $(( major * 10000 + minor * 100 + patch ))
+}
+
+sign_bundle() {
+  codesign --force --sign "$SIGNING_IDENTITY" "$@"
+}
+
 VERSION_STRING=$(read_version)
+BUILD_NUMBER=$(bundle_build_number "$VERSION_STRING")
+SPARKLE_DIR=$("$ROOT/scripts/fetch-sparkle.sh")
 WORK=$(mktemp -d "${TMPDIR:-/tmp}/claude-profiles-build.XXXXXX")
 trap 'rm -rf "$WORK"' EXIT
 STAGE="$WORK/$APP_NAME.app"
 CONTENTS="$STAGE/Contents"
 CLI_DIR="$CONTENTS/Resources/cli"
 
-mkdir -p "$CONTENTS/MacOS" "$CLI_DIR"
+mkdir -p "$CONTENTS/MacOS" "$CONTENTS/Resources" "$CLI_DIR"
 cp -X "$ROOT/Resources/Info.plist" "$CONTENTS/Info.plist"
 $PB -c "Set :CFBundleShortVersionString $VERSION_STRING" "$CONTENTS/Info.plist"
-$PB -c "Set :CFBundleVersion $VERSION_STRING" "$CONTENTS/Info.plist"
+$PB -c "Set :CFBundleVersion $BUILD_NUMBER" "$CONTENTS/Info.plist"
+
+mkdir -p "$CONTENTS/Frameworks"
+ditto "$SPARKLE_DIR/Sparkle.framework" "$CONTENTS/Frameworks/Sparkle.framework"
+cp "$SPARKLE_DIR/LICENSE" "$CONTENTS/Resources/Sparkle-LICENSE.txt"
 
 sdk=$(xcrun --sdk macosx --show-sdk-path)
 sources=( "$ROOT"/Sources/ClaudeProfiles/*.swift )
 for arch in arm64 x86_64; do
   print "Compiling $arch..."
   xcrun swiftc -O -sdk "$sdk" -target "$arch-apple-macos13.0" \
-    -framework AppKit -framework SwiftUI \
+    -F "$SPARKLE_DIR" -Xlinker -rpath -Xlinker @executable_path/../Frameworks \
+    -framework AppKit -framework SwiftUI -framework Sparkle \
     "${sources[@]}" -o "$WORK/$EXECUTABLE-$arch"
 done
 lipo -create "$WORK/$EXECUTABLE-arm64" "$WORK/$EXECUTABLE-x86_64" -output "$CONTENTS/MacOS/$EXECUTABLE"
@@ -70,7 +92,13 @@ done
 iconutil -c icns "$iconset" -o "$CONTENTS/Resources/AppIcon.icns"
 
 xattr -cr "$STAGE"
-codesign --force --sign "$SIGNING_IDENTITY" --identifier "$BUNDLE_ID" "$STAGE"
+SPARKLE_B="$CONTENTS/Frameworks/Sparkle.framework/Versions/B"
+sign_bundle --preserve-metadata=entitlements "$SPARKLE_B/XPCServices/Downloader.xpc"
+sign_bundle --preserve-metadata=entitlements "$SPARKLE_B/XPCServices/Installer.xpc"
+sign_bundle "$SPARKLE_B/Autoupdate"
+sign_bundle "$SPARKLE_B/Updater.app"
+sign_bundle "$CONTENTS/Frameworks/Sparkle.framework"
+sign_bundle --identifier "$BUNDLE_ID" "$STAGE"
 codesign --verify --deep --strict "$STAGE"
 
 print "Running the self-test ($(uname -m))..."
@@ -82,4 +110,4 @@ ditto "$STAGE" "$APP"
 codesign --verify --deep --strict "$APP"
 touch "$APP"
 
-print "Built: $APP (version $VERSION_STRING, $(lipo -archs "$APP/Contents/MacOS/$EXECUTABLE"))"
+print "Built: $APP (version $VERSION_STRING, build $BUILD_NUMBER, $(lipo -archs "$APP/Contents/MacOS/$EXECUTABLE"))"

@@ -43,7 +43,7 @@ final class AppModel: ObservableObject {
     @Published var legacyAgents: [LegacyAgent] = []
     @Published var details: [String: ProfileDetails] = [:]
     @Published var profileProjects: [String: [ProfileProject]] = [:]
-    @Published var selection: SidebarItem?
+    @Published var selection: SidebarItem? = .home
     @Published var hasLoaded = false
     @Published var isRefreshing = false
     @Published var activeCommand: String?
@@ -60,6 +60,7 @@ final class AppModel: ObservableObject {
     let runner: CLIRunner?
     private(set) var nextLogID = 0
     private var lastAutoRefresh = Date.distantPast
+    private var attemptedStaleCLIUpdate = false
     private static let autoRefreshMinimumInterval: TimeInterval = 2
 
     init(runner: CLIRunner? = CLILocator.bundledCLI().map { CLIRunner(script: $0) }) {
@@ -137,6 +138,9 @@ final class AppModel: ObservableObject {
         if let selectedSlug, profile(selectedSlug) != nil {
             await loadDetails(for: selectedSlug)
         }
+        for slug in profiles.map(\.slug) where slug != selectedSlug && details[slug] == nil {
+            await loadDetails(for: slug)
+        }
     }
 
     private enum RefreshPiece: Sendable {
@@ -175,9 +179,9 @@ final class AppModel: ObservableObject {
     private func reconcileSelection() {
         switch selection {
         case .profile(let slug) where profile(slug) == nil:
-            selection = profiles.first.map { .profile($0.slug) }
-        case .none where !hasLoaded:
-            selection = profiles.first.map { .profile($0.slug) }
+            selection = .home
+        case .none:
+            selection = .home
         default:
             break
         }
@@ -201,11 +205,11 @@ final class AppModel: ObservableObject {
     }
 
     @discardableResult
-    func run(_ title: String, _ arguments: [String], showsAlert: Bool = true, refreshAfter: Bool = true) async -> CommandResult? {
+    func run(_ title: String, _ arguments: [String], showsAlert: Bool = true, refreshAfter: Bool = true, revealsLog: Bool = true) async -> CommandResult? {
         guard let runner, activeCommand == nil else { return nil }
         activeCommand = title
         lastExitStatus = nil
-        logVisible = true
+        if revealsLog { logVisible = true }
         appendLog("$ claude-profiles " + arguments.map(Self.displayArgument).joined(separator: " "), isError: false, isCommand: true)
         let result = await runner.run(arguments) { line, isError in
             DispatchQueue.main.async {
@@ -286,12 +290,41 @@ final class AppModel: ObservableObject {
     }
 
     @discardableResult
-    func installCLI() async -> CommandResult? {
-        var arguments = ["install-cli"]
-        if let runner {
-            arguments += ["--from", runner.script.deletingLastPathComponent().deletingLastPathComponent().path]
+    func installCLI(quiet: Bool = false) async -> CommandResult? {
+        guard let runner else { return nil }
+        let arguments = ["install-cli", "--from", runner.script.deletingLastPathComponent().deletingLastPathComponent().path]
+        return await run("Install command-line tool", arguments, showsAlert: !quiet, revealsLog: !quiet)
+    }
+
+    func updateInstalledCLIIfStale() async {
+        guard let runner, !attemptedStaleCLIUpdate, hasLoaded, !isBusy, status?.cliCurrent == false else { return }
+        attemptedStaleCLIUpdate = true
+        let bundledRoot = runner.script.deletingLastPathComponent().deletingLastPathComponent()
+        let installedRoot = Self.installedCLIRoot(linkPath: status?.cliPath)
+        let decision = CLIUpdatePolicy.decide(
+            bundled: Self.version(in: bundledRoot),
+            installed: Self.version(in: installedRoot)
+        )
+        appendLog(decision.message, isError: false, isCommand: false)
+        guard decision.shouldInstall, let result = await installCLI(quiet: true) else { return }
+        appendLog(result.succeeded
+                  ? "Updated the installed command-line tool to match this app."
+                  : "Could not update the installed command-line tool. Open Setup & Settings and press Update.",
+                  isError: !result.succeeded, isCommand: false)
+    }
+
+    private static func installedCLIRoot(linkPath: String?) -> URL {
+        guard let linkPath, !linkPath.isEmpty else {
+            return URL(fileURLWithPath: NSHomeDirectory() + "/.local/share/claude-profiles")
         }
-        return await run("Install command-line tool", arguments)
+        return URL(fileURLWithPath: linkPath).resolvingSymlinksInPath()
+            .deletingLastPathComponent().deletingLastPathComponent()
+    }
+
+    private static func version(in root: URL) -> String? {
+        guard let text = try? String(contentsOf: root.appendingPathComponent("VERSION"), encoding: .utf8) else { return nil }
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
     }
 
     var preferredShell: String {

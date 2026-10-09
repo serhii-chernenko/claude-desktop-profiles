@@ -10,7 +10,7 @@ struct MainClaudeView: View {
                     RoundedRectangle(cornerRadius: 14, style: .continuous)
                         .fill(Color.secondary.opacity(0.18))
                         .frame(width: 56, height: 56)
-                        .overlay(Image(systemName: "house.fill").font(.system(size: 24)).foregroundStyle(.secondary))
+                        .overlay(Image(systemName: "person.crop.circle.fill").font(.system(size: 24)).foregroundStyle(.secondary))
                     VStack(alignment: .leading, spacing: 4) {
                         Text("Main Claude")
                             .font(.title2.weight(.semibold))
