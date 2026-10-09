@@ -15,11 +15,12 @@ A **desktop profile** is a full copy of `/Applications/Claude.app` with a differ
   state/link-at           "<slug> <epoch>", written by `link <slug>`: the open sign-in window
 ```
 
-A profile file holds `PROFILE_NAME`, `PROFILE_COLOR`, `PROFILE_HUE`, `PROFILE_SAT`, `PROFILE_DESKTOP`, `PROFILE_CLI`, `PROFILE_APP`, `PROFILE_LAUNCHER`, `PROFILE_BUNDLE_ID`, `PROFILE_DATA_DIR`, `PROFILE_CONFIG_DIR` and `PROFILE_DIRS`.
+A profile file holds `PROFILE_NAME`, `PROFILE_COLOR`, `PROFILE_SIGN_IDENTITY`, `PROFILE_DESKTOP`, `PROFILE_CLI`, `PROFILE_APP`, `PROFILE_LAUNCHER`, `PROFILE_BUNDLE_ID`, `PROFILE_DATA_DIR`, `PROFILE_CONFIG_DIR` and `PROFILE_DIRS`.
 
 - `PROFILE_DESKTOP=0` (`--no-desktop`) is a CLI-only profile: no app and no launcher. `list --plain` prints `-` for its `app` and `data_dir`, so a client must not offer recolor, rebuild or link for it.
 - `PROFILE_CLI=0` (`--no-cli`) is a desktop-only profile: no `claude-<slug>` function and no folder rules.
-- `PROFILE_COLOR` shows as `-` in `list --plain` when unset. `--hue DEG` is the **target** hue of the icon, not a rotation; the stored `PROFILE_HUE` is the computed shift from the source icon.
+- `PROFILE_COLOR` shows as `-` in `list --plain` when unset. `--hue DEG` is the **target** hue of the icon, not a rotation; the tool turns it into the color with that hue and the source icon's own saturation and value, and stores that hex. `PROFILE_HUE` and `PROFILE_SAT` of older profile files are ignored.
+- `PROFILE_SIGN_IDENTITY` is empty by default (resolved automatically, see fact 6). `adopt` fills it from the copy's current signature, `set <slug> sign-identity NAME` changes it.
 - `scan --plain` leaves out project folders without a `.jsonl` transcript and config dirs that have no `projects/`, `.claude.json` or `settings.json` (the main one is always listed).
 
 Environment variables: `CLAUDE_PROFILES_HOME` (settings folder), `CLAUDE_PROFILES_LOG` (log file), `CLAUDE_PROFILES_NO_URL_SET` (never change the `claude://` handler; for tests) and, in the shell hook, `CLAUDE_PROFILES_MODE` (`auto`, `warn` or `off`, overrides `CLI_RULE_MODE`). `lib/json.js` copies a `.claude.json` to `<file>.claude-profiles.bak` before it rewrites it.
@@ -56,7 +57,16 @@ Opening the copy from Spotlight, Finder, a `claude://` link or session restore s
 
 An ad-hoc signature has a designated requirement based on the code directory hash, so every rebuild is a "different app" to macOS. That re-triggers the Keychain prompt for "Claude Safe Storage" and the privacy (TCC) prompts. A self-signed identity that is trusted for code signing gives a designated requirement based on the certificate, which stays the same across rebuilds. `setup` creates it, trusts it with `security add-trusted-cert -p codeSign`, and fixes the key partition list so `codesign` can use the key without a prompt.
 
-Builds use `SIGN_IDENTITY` when present. A missing identity falls back to ad-hoc signing with a warning. An identity that exists but fails a test signature is an error: silently falling back to ad-hoc would quietly reintroduce the prompts. `build`, `launcher` and `recolor` all use this rule.
+The identity is chosen per profile, in this order, and the first one that is in the login keychain and passes a non-interactive test signature wins:
+
+1. `PROFILE_SIGN_IDENTITY`, when set (`set <slug> sign-identity NAME`, or `adopt --identity`).
+2. The identity that currently signs the copy's nested code: the first `Authority=` of `codesign -dvv` on `Contents/Frameworks/*Helper*.app`, then on the main executable. Apple and Developer ID authorities are not candidates. This keeps a hand-made copy on the identity it was made with, even if the global one is different.
+3. The global `SIGN_IDENTITY` from `config.env`.
+4. Ad-hoc, with a warning.
+
+If no identity is usable but one of the candidates is in the keychain and its test signature failed (locked keychain, key access), `build`, `recolor`, `launcher` and `resign` stop instead of falling back: silently going ad-hoc would quietly reintroduce the prompts. `auto` skips such a profile for the same reason.
+
+Mixed signatures are the failure to avoid. `codesign` without `--deep` re-signs only the outer bundle and leaves nested helpers alone, so an outer ad-hoc signature over helpers signed by an identity changes the designated requirement of the app while the helpers keep the old one, and Keychain and TCC ask again. `recolor`, `launcher` and `resign` therefore refuse to sign the outer bundle ad-hoc while the nested code carries a non-Apple identity that is not usable; `build` re-signs everything, so it cannot mix. `check` reports an ad-hoc outer bundle over identity-signed nested code as FAIL, and `resign <slug>` repairs it: it re-signs only the outer bundle and the launcher with the resolved identity. `auto` treats a copy whose outer signature is not the resolved identity as stale.
 
 ### 7. Where the Code tab keeps its sessions
 
@@ -68,7 +78,14 @@ Auto-mode agents and sandboxed shells cannot import keychain identities, answer 
 
 ### 9. The icon
 
-Modern Claude.app has both `CFBundleIconName` (an asset catalog, `Assets.car`) and `CFBundleIconFile` (`electron.icns`). The system prefers the catalog, which would show the original icon. The build deletes `CFBundleIconName` in the copy so the tinted `.icns` is used. The tint rotates the hue of every PNG in the iconset using CoreImage (`CIHueAdjust` plus `CIColorControls`), then `iconutil` rebuilds the `.icns`. The hue delta is computed relative to the **sampled** dominant hue of the source icon, not a constant, so a future Claude icon refresh does not break the colors.
+Modern Claude.app has both `CFBundleIconName` (an asset catalog, `Assets.car`) and `CFBundleIconFile` (`electron.icns`). The system prefers the catalog, which would show the original icon. The build deletes `CFBundleIconName` in the copy so the tinted `.icns` is used. `lib/color.js tint` recolors every PNG of the iconset with an exact mapping, then `iconutil` rebuilds the `.icns`:
+
+1. **Sample.** The source icon (always the original, never an already tinted one) is scaled to 128 px and its dominant color `(Hs, Ss, Vs)` is taken: pixels with saturation and value of at least 0.2 vote by `s*v` in a 36-bin hue histogram, and the winning bin's neighborhood is averaged. Nothing is hardcoded, so a future Claude icon refresh does not break the colors.
+2. **Map in HSV.** The target `(Ht, St, Vt)` comes from the stored `PROFILE_COLOR`. Every pixel goes to `h' = h + (Ht - Hs)`, `s' = clamp(s * St / Ss)`, `v' = clamp(v * Vt / Vs)`, blended with the original by `w = smoothstep(0.06, 0.22, s)`, so the nearly white glyph and the anti-aliased edges keep their colors. Grey and black targets (`St` near 0) work: saturated pixels turn grey, the glyph stays white.
+3. **Calibrate.** Clamping at `s = 1` and the blend make the plain ratios fall a little short, especially for very saturated targets. The scales are therefore refined for up to 12 rounds by running the real pipeline on a 33-step lookup table and measuring the dominant color of the result, until hue, saturation and value are within 0.003 of the target. The measurement pairs each result pixel with the source pixel that voted for the dominant color, so it also works for greys.
+4. **Apply.** The final 64x64x64 `CIColorCube` table is built in JXA (float data passed to CoreImage as base64-decoded `NSData`) and applied to each PNG in sRGB: `CILinearToSRGBToneCurve`, `CIColorCube`, `CISRGBToneCurveToLinear`, because CoreImage works in linear light by default.
+
+The whole iconset takes a few seconds. The dominant color of the result is within about 4/255 per channel of the requested color; an extremely saturated target such as `#f5b000` is the worst case because edge pixels blend with the white glyph.
 
 ### 10. Launching a copy takes over `claude://`
 
@@ -107,7 +124,7 @@ The native app (`Sources/ClaudeProfiles`, SwiftUI, compiled by `scripts/build-ap
 6. Verify the signature, re-check that the copy is not running, then swap the staged bundle into place (the old copy is kept until the move succeeded).
 7. Build the launcher with `osacompile`, copy `lib/urlhandler.js` into its `Contents/Resources`, give it the copy's icon and register both with `lsregister -f`; `killall Dock` when run interactively.
 
-`recolor` is the fast path: it re-tints the `.icns` from the **source** app's icon (never from the already tinted one), re-signs only the outer bundle, rebuilds the launcher, refreshes Launch Services and restarts the Dock. It works while the copy is running; the Dock updates after the copy restarts.
+`recolor` is the fast path: it re-tints the `.icns` from the **source** app's icon (never from the already tinted one), re-signs only the outer bundle with the profile's resolved identity, rebuilds the launcher, refreshes Launch Services and restarts the Dock. It works while the copy is running; the Dock updates after the copy restarts.
 
 ## The auto-rebuild agent
 
@@ -115,7 +132,7 @@ The native app (`Sources/ClaudeProfiles`, SwiftUI, compiled by `scripts/build-ap
 
 1. fixes bare launches;
 2. restores `claude://` to regular Claude once the link window expired (also the backstop for copies started without the launcher, see fact 10);
-3. decides whether the copy is stale: missing, wrong bundle ID (the copy's own updater can overwrite it), version differs from the source, launcher missing, `LSEnvironment` missing, or not signed by the configured identity;
+3. decides whether the copy is stale: missing, wrong bundle ID (the copy's own updater can overwrite it), version differs from the source, launcher missing, `LSEnvironment` missing, or not signed by the profile's resolved identity (including a mixed signature);
 4. skips the source if its own signature is invalid (an update in progress);
 5. if the copy is running, notifies once per version and waits; otherwise rebuilds.
 

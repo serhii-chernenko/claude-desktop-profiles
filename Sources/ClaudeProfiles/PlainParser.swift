@@ -75,7 +75,8 @@ enum PlainParser {
                     bundleID: columns[3],
                     dataDir: columns.count > 4 ? optional(columns[4]) : nil,
                     configDir: columns.count > 5 ? optional(columns[5]) : nil,
-                    name: columns.count > 6 ? optional(columns[6]) ?? fallbackName : fallbackName
+                    name: columns.count > 6 ? optional(columns[6]) ?? fallbackName : fallbackName,
+                    identity: columns.count > 7 ? optional(columns[7]) : nil
                 ))
             default:
                 continue

@@ -83,7 +83,7 @@ Every interactive prompt has a flag equivalent. `--yes` means "never prompt" and
 
 | Command | What it does |
 | --- | --- |
-| `new [--name N] [--slug s] [--color '#hex' \| --hue DEG \| --pick-color] [--desktop\|--no-desktop] [--cli\|--no-cli] [--data-dir P] [--config-dir P] [--dir PATH]... [--link PROJECT_CWD]... [--link-mode symlink\|move\|copy] [--no-build] [--yes] [--plain]` | Create a profile and build its app copy and launcher. `--plain` adds a final machine line `created`, the slug and the launcher path (or `-`), tab-separated. `--no-desktop` needs neither Claude.app nor a color. If the profile already exists, run `build <slug>` to retry the build. `--hue DEG` is the target hue of the icon in degrees (the tool computes the shift from the source icon), not a rotation. `--no-cli` makes a desktop-only profile (no `claude-<slug>` function, no folder rules); `--no-desktop` makes a CLI-only profile |
+| `new [--name N] [--slug s] [--color '#hex' \| --hue DEG \| --pick-color] [--desktop\|--no-desktop] [--cli\|--no-cli] [--data-dir P] [--config-dir P] [--dir PATH]... [--link PROJECT_CWD]... [--link-mode symlink\|move\|copy] [--no-build] [--yes] [--plain]` | Create a profile and build its app copy and launcher. `--plain` adds a final machine line `created`, the slug and the launcher path (or `-`), tab-separated. `--no-desktop` needs neither Claude.app nor a color. If the profile already exists, run `build <slug>` to retry the build. `--hue DEG` is the target hue of the icon in degrees (at the source icon's own saturation and brightness), not a rotation. `--no-cli` makes a desktop-only profile (no `claude-<slug>` function, no folder rules); `--no-desktop` makes a CLI-only profile |
 | `list [--plain]` | List profiles (the implicit `default` profile is included). `--plain` prints `slug`, `name`, `color`, `desktop` (`1` or `0`), `app`, `config_dir`, `data_dir`, tab-separated. For CLI-only profiles (`desktop` is `0`) `app` and `data_dir` are `-`; `color` is `-` when unset; the `default` row has color `-` |
 | `scan [--plain]` | Find existing config dirs, data dirs and projects with session history. `--plain` rows are `config`, `data` and `project` lines; project dirs without a `.jsonl` transcript are left out, and config dirs without `projects/`, `.claude.json` or `settings.json` are not listed (except the main one) |
 | `show <slug> [--plain]` | Print one profile's settings. `--plain` prints `key<TAB>value` lines, then one `dir` line per folder |
@@ -94,12 +94,14 @@ Every interactive prompt has a flag equivalent. `--yes` means "never prompt" and
 | `legacy-agents [--plain]` | List other LaunchAgents that watch Claude.app or a profile copy (earlier hand-made setups) |
 | `legacy-agents disable LABEL [--yes]` | Unload one of them and rename its plist to `.disabled`; nothing is deleted |
 | `build <slug>\|--all` | Rebuild the app copy and launcher from the current Claude.app |
-| `launcher <slug>` | Rebuild only the launcher |
-| `recolor <slug> [--color '#hex' \| --hue DEG \| --pick-color]` | Change the icon color in seconds, without a full rebuild (desktop profiles only; `--hue DEG` is the target hue) |
-| `check <slug>` | Verify profile isolation, signature, agent and version |
+| `launcher <slug>` | Rebuild only the launcher (refuses to sign it ad-hoc over an identity-signed copy) |
+| `resign <slug>` | Quick repair of a mixed signature: re-sign only the outer bundle and the launcher with the profile's resolved signing identity; nested code is left untouched |
+| `set <slug> sign-identity NAME\|--clear` | Pin the code-signing certificate used for one profile (`--clear` goes back to automatic) |
+| `recolor <slug> [--color '#hex' \| --hue DEG \| --pick-color]` | Change the icon color in seconds, without a full rebuild (desktop profiles only). The dominant color of the icon becomes exactly the chosen color; `--hue DEG` is the target hue at the original saturation and brightness. The outer bundle is re-signed with the profile's identity |
+| `check <slug>` | Verify profile isolation, signature, agent and version. An ad-hoc outer bundle over identity-signed nested code is reported as FAIL with the fix (`resign`) |
 | `link <slug>\|main` | Send `claude://` links (sign-in) to a profile copy for `LINK_TTL` (15 minutes by default), or back to regular Claude (desktop profiles only) |
 | `remove <slug> [--delete-data] [--delete-config] [--yes]` | Remove the app copy, launcher and profile entry; data and config are kept unless asked. If `claude://` points at the removed copy it is restored to regular Claude first |
-| `adopt --slug s --name N --app PATH [--launcher PATH] [--data-dir P] [--config-dir P] [--identity NAME] [--color '#hex'] [--dir PATH]...` | Register a hand-made install without rebuilding. Without `--data-dir` the default data dir must already exist. `scan` lists hand-made copies it finds as `candidate` rows, ready to adopt |
+| `adopt --slug s --name N --app PATH [--launcher PATH] [--data-dir P] [--config-dir P] [--identity NAME] [--color '#hex'] [--dir PATH]...` | Register a hand-made install without rebuilding. Without `--data-dir` the default data dir must already exist. `scan` lists hand-made copies it finds as `candidate` rows (the last column is the signing identity found in the copy, or `-`), ready to adopt. Adopt keeps the identity the copy is signed with (stored per profile as `PROFILE_SIGN_IDENTITY`); `--identity NAME` overrides it |
 | `setup [--identity NAME]` | One-time, terminal only: signing identity and the auto-rebuild LaunchAgent |
 | `auto [--dry-run]` | What the LaunchAgent runs: rebuild stale profiles, fix wrong-profile launches |
 | `uninstall-agent` | Remove the LaunchAgent |
@@ -143,6 +145,8 @@ The log is `~/Library/Logs/claude-profiles.log`.
 
 Ad-hoc signatures change on every rebuild, so macOS would ask again for Keychain access ("Claude Safe Storage") and privacy permissions after each Claude update. `setup` creates a self-signed code-signing identity (default name `Claude Profiles Signing`) in your login keychain, trusts it for code signing and lets `codesign` use it without prompts. Rebuilds then keep the same designated requirement and macOS stops asking. `setup` is interactive because it needs your login password; it must be run by you in Terminal. It is optional: without it everything works, with re-prompts after each rebuild.
 
+The identity is chosen per profile: the one set with `set <slug> sign-identity` (or `adopt --identity`), else the one that already signs the copy's nested code, else the global one from `setup`, else ad-hoc. If the chosen identity cannot sign (locked keychain), `build`, `recolor` and `launcher` stop instead of mixing an ad-hoc outer signature with identity-signed helpers. Details: [docs/how-it-works.md](docs/how-it-works.md).
+
 ## CLI profiles and shell-init
 
 Turn on **Shell integration** in the app, or run `claude-profiles shell-init install` (it adds one marked block to `~/.zshrc` or `~/.bashrc`; `shell-init uninstall` removes it). By hand, add this line to your shell startup file:
@@ -176,6 +180,10 @@ The `claude-profiles.bak` backups: when a project is linked, edited `.claude.jso
 ## Troubleshooting
 
 **Keychain asks for "Claude Safe Storage".** Click **Always Allow**. With the stable signing identity from `setup` this happens once; with ad-hoc signing it happens after each rebuild.
+
+**Keychain or permission prompts come back after `recolor` (or `check` says "mixed signature").** The outer app was signed ad-hoc while its helpers still carry a certificate, which changes the app's identity for macOS. Run `claude-profiles check <slug>`; if it names a mixed signature, unlock the login keychain and run `claude-profiles resign <slug>` (add `claude-profiles set <slug> sign-identity "<Something> Signing"` first if the certificate is not detected). `recolor` and `launcher` now refuse to create this state; `adopt` keeps the signature of the copy it registers.
+
+**The icon color differs from the one I picked.** Fixed: the icon is now remapped so its dominant color equals the picked color (hue, saturation and brightness), within a few steps out of 255. Run `claude-profiles recolor <slug> --color '#hex'` once to re-apply it to a copy tinted by an older version.
 
 **Signing in opens the wrong app.** The `claude://` callback goes to whichever app owns the scheme. Every launch of a profile copy makes it the owner (Electron registers itself on startup), so right after launching a copy, links would go to it. The launcher gives the scheme back to regular Claude after about 10 seconds unless a `link <slug>` window is open. Run `claude-profiles link <slug>` (or **Link sign-in** in the app), sign in, then `link main`. It reverts automatically after the TTL if the LaunchAgent is installed.
 

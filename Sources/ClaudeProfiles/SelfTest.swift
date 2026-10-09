@@ -92,7 +92,7 @@ enum SelfTest {
         config\t/h/.claude\t41
         data\t/h/Library/Application Support/Claude-Work
         project\t/h/.claude\t/h/dev/app\t5\t2026-10-09T11:45:10+0200\t-
-        candidate\t/Applications/Claude Work.app\t/Applications/Claude Work Launcher.app\tcom.example.work\t/h/data\t-\tWork\tfuture
+        candidate\t/Applications/Claude Work.app\t/Applications/Claude Work Launcher.app\tcom.example.work\t/h/data\t-\tWork\tWork Signing\tfuture
         mystery\tcolumn
         candidate\t/Applications/Claude Two.app\t-\tcom.example.two
         """)
@@ -102,6 +102,7 @@ enum SelfTest {
         expect(scan.candidates.count == 2, "scan parser reads candidate rows and ignores unknown types")
         expect(scan.candidates.first?.configDir == nil && scan.candidates.first?.name == "Work", "candidate parser maps - and names")
         expect(scan.candidates.last?.name == "Two" && scan.candidates.last?.launcher == nil, "candidate parser tolerates missing columns")
+        expect(scan.candidates.first?.identity == "Work Signing" && scan.candidates.last?.identity == nil, "candidate parser reads the signing identity column")
 
         let show = PlainParser.profileDetails("slug\twork\ncli\t1\napp\t-\ndir\t/h/dev\ndir\t/h/other\nnew_key\tvalue\textra")
         expect(show.value("slug") == "work" && show.flag("cli") == true && show.value("app") == nil, "show parser reads fields")

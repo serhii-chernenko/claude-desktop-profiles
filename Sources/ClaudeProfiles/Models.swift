@@ -37,6 +37,7 @@ struct Candidate: Identifiable, Hashable {
     let dataDir: String?
     let configDir: String?
     let name: String
+    let identity: String?
 
     var id: String { app }
     var appDisplayName: String { (app as NSString).lastPathComponent.replacingOccurrences(of: ".app", with: "") }

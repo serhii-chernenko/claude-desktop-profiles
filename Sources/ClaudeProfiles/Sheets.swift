@@ -8,12 +8,13 @@ struct AdoptSheet: View {
     @State private var name: String
     @State private var slug: String
     @State private var slugEdited = false
-    @State private var identity = ""
+    @State private var identity: String
     @State private var logStart: Int?
     @State private var error: String?
 
     init(candidate: Candidate) {
         self.candidate = candidate
+        _identity = State(initialValue: candidate.identity ?? "")
         _name = State(initialValue: candidate.name)
         _slug = State(initialValue: PlainParser.slugify(candidate.name))
     }
@@ -55,9 +56,9 @@ struct AdoptSheet: View {
             }
             Section {
                 VStack(alignment: .leading, spacing: 3) {
-                    TextField("Signing identity (optional)", text: $identity, prompt: Text("Leave empty to keep the default"))
+                    TextField("Signing identity (optional)", text: $identity, prompt: Text("Leave empty if the copy is not signed with a certificate"))
                     Text(PlainParser.isValidIdentity(identity)
-                         ? "The name of the code-signing certificate in your keychain this copy was signed with, if any. Keeps Keychain from asking again after rebuilds."
+                         ? "Keeps the existing signature so macOS doesn't ask for Keychain or permissions again."
                          : "Use only letters, digits, space, dot, underscore and dash.")
                         .font(.caption)
                         .foregroundStyle(PlainParser.isValidIdentity(identity) ? Color.secondary : Color.red)

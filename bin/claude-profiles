@@ -12,6 +12,8 @@
 #   show <slug> [--plain]               profile details (--plain: key<TAB>value lines, then one dir line per folder)
 #   build <slug>|--all                  (re)build the desktop copy and its launcher
 #   launcher <slug>                     rebuild only the launcher
+#   resign <slug>                       re-sign only the outer bundle and the launcher with the resolved identity
+#   set <slug> sign-identity NAME|--clear   pin the signing identity of one profile
 #   recolor <slug> [--color '#hex'|--hue DEG|--pick-color]
 #   check <slug>                        post-launch checks
 #   link <slug>|main                    send claude:// links to a profile (reverts after LINK_TTL) or back
@@ -78,7 +80,7 @@ DEFAULT_IDENTITY="Claude Profiles Signing"
 DEFAULT_SOURCE_TEAM_ID=Q6L2SF6YDW
 DEFAULT_AGENT_LABEL=io.github.claude-desktop-profiles.rebuild
 DEFAULT_PALETTE=('#3a7bd5' '#2ecc71' '#9b59b6' '#e67e22' '#e84393' '#16a085' '#f1c40f' '#c0392b')
-PROFILE_KEYS=(PROFILE_NAME PROFILE_COLOR PROFILE_HUE PROFILE_SAT PROFILE_DESKTOP PROFILE_CLI PROFILE_APP PROFILE_LAUNCHER PROFILE_BUNDLE_ID PROFILE_DATA_DIR PROFILE_CONFIG_DIR)
+PROFILE_KEYS=(PROFILE_NAME PROFILE_COLOR PROFILE_SIGN_IDENTITY PROFILE_DESKTOP PROFILE_CLI PROFILE_APP PROFILE_LAUNCHER PROFILE_BUNDLE_ID PROFILE_DATA_DIR PROFILE_CONFIG_DIR)
 QUIT_WAIT_SECONDS=20
 LOCK_STALE_MINUTES=30
 
@@ -86,6 +88,8 @@ PLAIN=0
 YES=0
 DRY=0
 SIGN_ID=-
+SIGN_SOURCE=adhoc
+SIGN_BLOCKED=
 IS_AUTO=${CLAUDE_PROFILES_AUTO:-0}
 PARENT_LOCK=${CLAUDE_PROFILES_LOCKED:-0}
 LOCK_HELD=0
@@ -426,8 +430,6 @@ profile_fill_defaults() {
   : ${PROFILE_NAME:=$SLUG}
   : ${PROFILE_DESKTOP:=1}
   : ${PROFILE_CLI:=1}
-  : ${PROFILE_HUE:=0}
-  : ${PROFILE_SAT:=1}
   : ${PROFILE_APP:=/Applications/Claude $PROFILE_NAME.app}
   : ${PROFILE_LAUNCHER:=${PROFILE_APP%.app} Launcher.app}
   : ${PROFILE_BUNDLE_ID:=$BUNDLE_ID_PREFIX.$SLUG}
@@ -544,21 +546,13 @@ source_icns() {
 }
 
 resolve_color() {
-  local icns out
+  local icns
   if ! icns=$(source_icns); then
     [[ $1 == '#'* ]] || die "No .icns icon found in $SOURCE_APP; a hue needs the source icon (give the color as #hex instead)."
-    PROFILE_HUE=0
-    PROFILE_SAT=1
     PROFILE_COLOR=$1
     return 0
   fi
-  out=$(jxa color.js params "$1" "$icns") || die "Could not compute the tint for \"$1\" from $icns"
-  local -a parts
-  parts=( ${=out} )
-  (( ${#parts} == 3 )) || die "Unexpected tint parameters: $out"
-  PROFILE_HUE=$parts[1]
-  PROFILE_SAT=$parts[2]
-  PROFILE_COLOR=$parts[3]
+  PROFILE_COLOR=$(jxa color.js resolve "$1" "$icns") || die "Could not resolve the color \"$1\" from $icns"
 }
 
 apply_color_choice() {
@@ -575,10 +569,13 @@ apply_color_choice() {
 }
 
 tint_icns() {
-  local src=$1 dst=$2 hue=$3 sat=$4 set="$TMP/icon-$RANDOM.iconset"
+  local src=$1 dst=$2 color=$3 set="$TMP/icon-$RANDOM.iconset"
+  local -a largest
   rm -rf -- "$set"
   iconutil -c iconset "$src" -o "$set" || return 1
-  jxa tint.js "$set" "$hue" "$sat" >/dev/null || return 1
+  largest=( "$set"/*.png(.OL[1]N) )
+  (( ${#largest} )) || return 1
+  jxa color.js tint "$set" "$color" "${largest[1]}" >/dev/null || return 1
   iconutil -c icns "$set" -o "$dst" || return 1
   rm -rf -- "$set"
 }
@@ -595,39 +592,118 @@ sanitize_ents() {
 }
 
 identity_present() {
-  [[ $SIGN_IDENTITY != - ]] && security find-certificate -c "$SIGN_IDENTITY" "$KEYCHAIN" >/dev/null 2>&1
+  local name=${1:-$SIGN_IDENTITY}
+  [[ $name != - ]] && security find-certificate -c "$name" "$KEYCHAIN" >/dev/null 2>&1
 }
 
-probe_sign_id() {
-  local probe="$TMP/sign-probe"
-  if ! identity_present; then
+probe_identity() {
+  local name=${1:-$SIGN_IDENTITY} probe="$TMP/sign-probe"
+  if ! identity_present "$name"; then
     print -- -
     return 0
   fi
   cp /usr/bin/true "$probe"
-  if codesign --force --sign "$SIGN_IDENTITY" --timestamp=none "$probe" </dev/null >/dev/null 2>&1; then
-    print -r -- "$SIGN_IDENTITY"
+  if codesign --force --sign "$name" --timestamp=none "$probe" </dev/null >/dev/null 2>&1; then
+    print -r -- "$name"
   else
     print -- -
   fi
 }
 
+probe_sign_id() {
+  probe_identity "$SIGN_IDENTITY"
+}
+
+first_authority() {
+  local output
+  local -a lines authorities
+  output=$(codesign -dvv "$1" 2>&1 || true)
+  lines=( "${(@f)output}" )
+  authorities=( "${(@M)lines:#Authority=*}" )
+  print -r -- "${${authorities[1]:-}#Authority=}"
+}
+
+vendor_authority() {
+  [[ $1 == (Developer ID|Apple|Mac Developer|Software Signing|Apple Development|Apple Distribution)* ]]
+}
+
+app_signing_identity() {
+  local app=$1 exe target authority
+  local -a targets
+  targets=( "$app"/Contents/Frameworks/*Helper*.app(N) )
+  exe=$(plist_get "$app" CFBundleExecutable)
+  [[ -n $exe && -f $app/Contents/MacOS/$exe ]] && targets+=( "$app/Contents/MacOS/$exe" )
+  for target in $targets; do
+    authority=$(first_authority "$target")
+    if [[ -n $authority ]]; then
+      vendor_authority "$authority" && return 1
+      print -r -- "$authority"
+      return 0
+    fi
+  done
+  return 1
+}
+
+usable_app_identity() {
+  local name
+  name=$(app_signing_identity "$1") || return 1
+  valid_identity "$name" && identity_present "$name" || return 1
+  print -r -- "$name"
+}
+
+resolve_sign_identity() {
+  local name i nested
+  local -a names sources
+  SIGN_ID=-
+  SIGN_SOURCE=adhoc
+  SIGN_BLOCKED=
+  if [[ -n $PROFILE_SIGN_IDENTITY ]]; then
+    names+=( "$PROFILE_SIGN_IDENTITY" )
+    sources+=( "profile setting" )
+  fi
+  if [[ -d $PROFILE_APP ]] && nested=$(app_signing_identity "$PROFILE_APP"); then
+    names+=( "$nested" )
+    sources+=( "current signature of ${PROFILE_APP:t}" )
+  fi
+  names+=( "$SIGN_IDENTITY" )
+  sources+=( "SIGN_IDENTITY" )
+  for (( i = 1; i <= ${#names}; i++ )); do
+    name=$names[i]
+    [[ $name != - ]] || continue
+    valid_identity "$name" || { warn "Ignoring signing identity \"$name\" ($sources[i]): unsupported characters."; continue }
+    identity_present "$name" || continue
+    if [[ $(probe_identity "$name") == "$name" ]]; then
+      SIGN_ID=$name
+      SIGN_SOURCE=$sources[i]
+      return 0
+    fi
+    [[ -n $SIGN_BLOCKED ]] || SIGN_BLOCKED=$name
+  done
+  return 0
+}
+
 choose_sign_id() {
-  if [[ $SIGN_IDENTITY == - ]]; then
-    SIGN_ID=-
-    say "Signing: ad-hoc (SIGN_IDENTITY=-)"
+  resolve_sign_identity
+  if [[ $SIGN_ID != - ]]; then
+    say "Signing identity: $SIGN_ID ($SIGN_SOURCE)"
     return 0
   fi
-  if identity_present; then
-    SIGN_ID=$(probe_sign_id)
-    if [[ $SIGN_ID == - ]]; then
-      die "Identity \"$SIGN_IDENTITY\" is in the keychain but a test signature failed (locked keychain or key access?). Not falling back to ad-hoc signing. Unlock the login keychain or run: claude-profiles setup"
-    fi
-    say "Signing identity: $SIGN_ID"
-  else
-    SIGN_ID=-
-    warn "Identity \"$SIGN_IDENTITY\" not found: falling back to ad-hoc signing (Keychain/TCC re-prompts after every rebuild). Run in Terminal: claude-profiles setup"
+  if [[ -n $SIGN_BLOCKED ]]; then
+    die "Identity \"$SIGN_BLOCKED\" is in the keychain but a test signature failed (locked keychain or key access?). Not falling back to ad-hoc signing. Unlock the login keychain or run: claude-profiles setup"
   fi
+  [[ ${1:-} != keep ]] || refuse_mixed_signature
+  if [[ $SIGN_IDENTITY == - && -z $PROFILE_SIGN_IDENTITY ]]; then
+    say "Signing: ad-hoc (SIGN_IDENTITY=-)"
+  else
+    warn "No usable signing identity (\"${PROFILE_SIGN_IDENTITY:-$SIGN_IDENTITY}\" not found): falling back to ad-hoc signing (Keychain/TCC re-prompts after every rebuild). Run in Terminal: claude-profiles setup"
+  fi
+}
+
+refuse_mixed_signature() {
+  [[ $SIGN_ID == - && -d $PROFILE_APP ]] || return 0
+  local nested
+  nested=$(app_signing_identity "$PROFILE_APP") || return 0
+  die "$PROFILE_APP is signed by \"$nested\" inside, but that identity is not usable (missing from the login keychain or the keychain is locked). Signing the outer bundle ad-hoc would mix signatures, and macOS would ask for Keychain and permissions again. Unlock the login keychain, or run a full rebuild: claude-profiles build $SLUG"
 }
 
 ts_args() {
@@ -692,6 +768,11 @@ copy_icns_path() {
   fi
 }
 
+sign_launcher() {
+  ts_args
+  codesign --force --sign "$SIGN_ID" "${TS_ARGS[@]}" "$1" 2>"$TMP/codesign.err" || { cat "$TMP/codesign.err" >&2; return 1; }
+}
+
 build_launcher() {
   local icns=${1:-} L=$PROFILE_LAUNCHER LID
   LID=$(launcher_id)
@@ -732,8 +813,7 @@ EOF
     cp -- "$icns" "$L/Contents/Resources/applet.icns"
   fi
   xattr -cr "$L"
-  ts_args
-  codesign --force --sign "$SIGN_ID" "${TS_ARGS[@]}" "$L" 2>"$TMP/codesign.err" || { cat "$TMP/codesign.err" >&2; die "Could not sign $L"; }
+  sign_launcher "$L" || die "Could not sign $L"
   touch -- "$L"
   "$LSREG" -f "$L" >/dev/null 2>&1 || true
 }
@@ -756,7 +836,6 @@ build_profile() {
   choose_sign_id
 
   if [[ -n $PROFILE_COLOR ]]; then
-    say "Sampling the source icon for $PROFILE_COLOR..."
     resolve_color "$PROFILE_COLOR"
     profile_save
   fi
@@ -789,7 +868,7 @@ build_profile() {
   EXE=$($PB -c "Print :CFBundleExecutable" "$PLIST")
 
   renew_lock
-  say "Tinting icon (hue shift $PROFILE_HUE, saturation x$PROFILE_SAT)..."
+  say "Tinting icon${PROFILE_COLOR:+ to $PROFILE_COLOR}..."
   plutil -remove CFBundleIconName "$PLIST" 2>/dev/null || true
   local ICON_FILE ICNS=""
   ICON_FILE=$($PB -c "Print :CFBundleIconFile" "$PLIST" 2>/dev/null || true)
@@ -803,9 +882,9 @@ build_profile() {
       plutil -insert CFBundleIconFile -string "${ICNS:t}" "$PLIST"
     fi
   fi
-  if [[ -f ${ICNS:-} ]]; then
-    tint_icns "$ICNS" "$ICNS" "$PROFILE_HUE" "$PROFILE_SAT" || warn "Tinting failed; icon left unchanged."
-  else
+  if [[ -n $PROFILE_COLOR && -f ${ICNS:-} ]]; then
+    tint_icns "$ICNS" "$ICNS" "$PROFILE_COLOR" || warn "Tinting failed; icon left unchanged."
+  elif [[ -n $PROFILE_COLOR ]]; then
     warn "No usable .icns found; icon left unchanged."
   fi
 
@@ -885,11 +964,12 @@ stale_reason() {
     print -r -- "copy lacks LSEnvironment:CLAUDE_CONFIG_DIR=$PROFILE_CONFIG_DIR"
     return 0
   fi
-  if identity_present; then
+  resolve_sign_identity
+  if [[ $SIGN_ID != - ]]; then
     local signature
     signature=$(codesign -dvv "$PROFILE_APP" 2>&1 || true)
-    if ! grep -qxF "Authority=$SIGN_IDENTITY" <<<"$signature"; then
-      print -r -- "copy is not signed by \"$SIGN_IDENTITY\" (ad-hoc or other) although the identity is installed"
+    if ! grep -qxF "Authority=$SIGN_ID" <<<"$signature"; then
+      print -r -- "copy is not signed by \"$SIGN_ID\" (ad-hoc, mixed or other) although the identity is usable"
       return 0
     fi
   fi
@@ -1055,7 +1135,7 @@ is_profile_app() {
 
 scan_candidates() {
   SC_CAND=()
-  local app bundle_id launcher decompiled data_dir config_dir name base t=$'\t'
+  local app bundle_id launcher decompiled data_dir config_dir identity name base t=$'\t'
   local source_id
   source_id=$(src_id)
   for app in "$APPS_DIR"/*.app(N-/); do
@@ -1067,7 +1147,8 @@ scan_candidates() {
     same_path "$app" "$SOURCE_APP" && continue
     [[ ${(L)bundle_id} != ${(L)source_id} ]] || continue
     is_profile_app "$app" "$bundle_id" && continue
-    launcher=- data_dir= config_dir=
+    launcher=- data_dir= config_dir= identity=
+    identity=$(usable_app_identity "$app" || true)
     if [[ -d "${app%.app} Launcher.app" ]]; then
       launcher="${app%.app} Launcher.app"
       decompiled=$(osadecompile "$launcher/Contents/Resources/Scripts/main.scpt" 2>/dev/null || true)
@@ -1079,7 +1160,7 @@ scan_candidates() {
     [[ -n $config_dir ]] || config_dir=$(plist_get "$app" LSEnvironment:CLAUDE_CONFIG_DIR)
     name=${base#Claude }
     has_control_chars "$data_dir$config_dir" && continue
-    SC_CAND+=( "$app$t$launcher$t$bundle_id$t${data_dir:--}$t${config_dir:--}$t$name" )
+    SC_CAND+=( "$app$t$launcher$t$bundle_id$t${data_dir:--}$t${config_dir:--}$t$name$t${identity:--}" )
   done
 }
 
@@ -1145,7 +1226,7 @@ cmd_scan() {
   local -a fields
   for i in $SC_CAND; do
     fields=( "${(@ps:\t:)i}" )
-    say "  $(tilde "$fields[1]")  ${C_DIM}name $fields[6], data $(tilde "$fields[4]"), config $(tilde "$fields[5]")${C_RESET}"
+    say "  $(tilde "$fields[1]")  ${C_DIM}name $fields[6], data $(tilde "$fields[4]"), config $(tilde "$fields[5]"), signed by ${fields[7]:--}${C_RESET}"
   done
 }
 
@@ -1207,8 +1288,7 @@ cmd_show() {
       print -r -- "slug${t}default"
       print -r -- "name${t}Claude"
       print -r -- "color${t}-"
-      print -r -- "hue${t}0"
-      print -r -- "sat${t}1"
+      print -r -- "sign_identity${t}-"
       print -r -- "desktop${t}1"
       print -r -- "cli${t}1"
       print -r -- "app${t}$SOURCE_APP"
@@ -1234,8 +1314,7 @@ cmd_show() {
     print -r -- "slug${t}$SLUG"
     print -r -- "name${t}$PROFILE_NAME"
     print -r -- "color${t}${PROFILE_COLOR:--}"
-    print -r -- "hue${t}${PROFILE_HUE:--}"
-    print -r -- "sat${t}${PROFILE_SAT:--}"
+    print -r -- "sign_identity${t}${PROFILE_SIGN_IDENTITY:--}"
     print -r -- "desktop${t}$PROFILE_DESKTOP"
     print -r -- "cli${t}$PROFILE_CLI"
     print -r -- "app${t}$app"
@@ -1261,7 +1340,8 @@ cmd_show() {
   fi
   say "slug        $SLUG"
   say "name        $PROFILE_NAME"
-  say "color       ${PROFILE_COLOR:--} (hue shift $PROFILE_HUE, saturation x$PROFILE_SAT)"
+  say "color       ${PROFILE_COLOR:--}"
+  say "signing     ${PROFILE_SIGN_IDENTITY:-automatic}"
   say "desktop     $PROFILE_DESKTOP"
   say "cli         $PROFILE_CLI"
   say "app         $PROFILE_APP ($state)"
@@ -1606,7 +1686,7 @@ cmd_launcher() {
   (( PROFILE_DESKTOP )) || die "Profile \"$SLUG\" has no desktop app."
   [[ -d $PROFILE_APP ]] || die "$PROFILE_APP not found. Build it first: claude-profiles build $SLUG"
   need_lock
-  choose_sign_id
+  choose_sign_id keep
   build_launcher "$(copy_icns_path "$PROFILE_APP")"
   say "Launcher rebuilt: $PROFILE_LAUNCHER (quit ${PROFILE_APP:t:r} and reopen it via the launcher to apply)"
 }
@@ -1631,13 +1711,18 @@ cmd_recolor() {
     can_prompt || usage_error "recolor needs --color, --hue or --pick-color"
     color_kind=pick
   fi
-  local src
+  local src dst_icns
   if (( PROFILE_DESKTOP )) && [[ -d $PROFILE_APP ]]; then
     src=$(source_icns) || die "No .icns icon found in $SOURCE_APP; it is needed to tint $PROFILE_APP."
+    assert_ours "$PROFILE_APP" "$PROFILE_BUNDLE_ID"
+    need_lock
+    choose_sign_id keep
+    dst_icns=$(copy_icns_path "$PROFILE_APP")
+    [[ -n $dst_icns ]] || die "$PROFILE_APP has no CFBundleIconFile; rebuild it: claude-profiles build $SLUG"
   fi
   apply_color_choice "$color_kind" "$color_value"
   profile_save
-  say "Color of \"$SLUG\" is now $PROFILE_COLOR (hue shift $PROFILE_HUE, saturation x$PROFILE_SAT)"
+  say "Color of \"$SLUG\" is now $PROFILE_COLOR"
   if (( ! PROFILE_DESKTOP )); then
     return 0
   fi
@@ -1645,14 +1730,8 @@ cmd_recolor() {
     say "$PROFILE_APP is not built yet; the color applies on: claude-profiles build $SLUG"
     return 0
   fi
-  assert_ours "$PROFILE_APP" "$PROFILE_BUNDLE_ID"
-  need_lock
-  choose_sign_id
-  local dst_icns
-  dst_icns=$(copy_icns_path "$PROFILE_APP")
-  [[ -n $dst_icns ]] || die "$PROFILE_APP has no CFBundleIconFile; rebuild it: claude-profiles build $SLUG"
   say "Tinting icon..."
-  tint_icns "$src" "$TMP/recolor.icns" "$PROFILE_HUE" "$PROFILE_SAT" || die "Tinting failed."
+  tint_icns "$src" "$TMP/recolor.icns" "$PROFILE_COLOR" || die "Tinting failed."
   cp -f -- "$TMP/recolor.icns" "$dst_icns"
   if [[ -n $(plist_get "$PROFILE_APP" CFBundleIconName) ]]; then
     plutil -remove CFBundleIconName "$PROFILE_APP/Contents/Info.plist"
@@ -1669,6 +1748,76 @@ cmd_recolor() {
   else
     say "Done."
   fi
+}
+
+cmd_set() {
+  local slug="" key="" value="" have_value=0
+  while (( $# )); do
+    case $1 in
+      --yes|-y) YES=1; shift ;;
+      --plain) PLAIN=1; shift ;;
+      --clear) value=""; have_value=1; shift ;;
+      -*) usage_error "set <slug> sign-identity NAME|--clear" ;;
+      *)
+        if [[ -z $slug ]]; then slug=$1
+        elif [[ -z $key ]]; then key=$1
+        elif (( ! have_value )); then value=$1; have_value=1
+        else usage_error "set <slug> sign-identity NAME|--clear"
+        fi
+        shift ;;
+    esac
+  done
+  [[ -n $slug && -n $key ]] && (( have_value )) || usage_error "set <slug> sign-identity NAME|--clear"
+  [[ $key == sign-identity ]] || usage_error "set: unknown setting \"$key\" (only sign-identity)"
+  setup_colors
+  reject_control_chars "set value" "$value"
+  profile_load "$slug"
+  if [[ -n $value ]]; then
+    [[ $value != - ]] && valid_identity "$value" || usage_error "invalid identity \"$value\" (letters, digits, space, dot, underscore, dash)"
+    identity_present "$value" || warn "Identity \"$value\" is not in the login keychain yet; it is ignored until it is."
+  fi
+  need_lock
+  PROFILE_SIGN_IDENTITY=$value
+  profile_save
+  if [[ -n $value ]]; then
+    say "Signing identity of \"$SLUG\" is now \"$value\". Apply it to the existing copy: claude-profiles resign $SLUG"
+  else
+    say "Signing identity of \"$SLUG\" is automatic again."
+  fi
+}
+
+cmd_resign() {
+  local target=""
+  while (( $# )); do
+    case $1 in
+      --yes|-y) YES=1; shift ;;
+      --plain) PLAIN=1; shift ;;
+      -*) usage_error "resign <slug>" ;;
+      *) target=$1; shift ;;
+    esac
+  done
+  [[ -n $target ]] || usage_error "resign <slug>"
+  setup_colors
+  profile_load "$target"
+  (( PROFILE_DESKTOP )) || die "Profile \"$SLUG\" has no desktop app."
+  [[ -d $PROFILE_APP ]] || die "$PROFILE_APP not found. Build it first: claude-profiles build $SLUG"
+  assert_ours "$PROFILE_APP" "$PROFILE_BUNDLE_ID"
+  need_lock
+  choose_sign_id keep
+  say "Re-signing the outer bundle of ${PROFILE_APP:t:r}..."
+  sign_bundle "$PROFILE_APP" >/dev/null 2>&1 || die "Could not re-sign $PROFILE_APP; run: claude-profiles build $SLUG"
+  if [[ -d $PROFILE_LAUNCHER ]]; then
+    assert_ours "$PROFILE_LAUNCHER" "$(launcher_id)"
+    say "Re-signing the launcher..."
+    xattr -cr "$PROFILE_LAUNCHER"
+    sign_launcher "$PROFILE_LAUNCHER" || die "Could not re-sign $PROFILE_LAUNCHER"
+    touch -- "$PROFILE_LAUNCHER"
+    "$LSREG" -f "$PROFILE_LAUNCHER" >/dev/null 2>&1 || true
+  fi
+  touch -- "$PROFILE_APP"
+  "$LSREG" -f "$PROFILE_APP" >/dev/null 2>&1 || true
+  codesign --verify --strict "$PROFILE_APP" >/dev/null 2>&1 || warn "codesign --verify reported problems for $PROFILE_APP."
+  say "Done. Nested code was left untouched. Check it: claude-profiles check $SLUG"
 }
 
 cmd_check() {
@@ -1764,21 +1913,32 @@ cmd_check() {
   else
     warnl "signature check failed"
   fi
-  local sig
+  local sig outer_authority nested_identity
   sig=$(codesign -dvv "$DST" 2>&1 || true)
-  if [[ $SIGN_IDENTITY == - ]]; then
+  outer_authority=$(first_authority "$DST")
+  nested_identity=$(app_signing_identity "$DST" || true)
+  resolve_sign_identity
+  if [[ $SIGN_ID != - ]]; then
+    ok "signing identity \"$SIGN_ID\" is usable ($SIGN_SOURCE)"
+  elif [[ -n $SIGN_BLOCKED ]]; then
+    warnl "signing identity \"$SIGN_BLOCKED\" is in the keychain but a test signature failed: unlock the login keychain or run in Terminal: claude-profiles setup"
+  elif [[ $SIGN_IDENTITY == - && -z $PROFILE_SIGN_IDENTITY ]]; then
     infol "SIGN_IDENTITY is ad-hoc (-): every rebuild re-prompts Keychain/TCC"
-  elif identity_present; then
-    ok "signing identity \"$SIGN_IDENTITY\" is in the login keychain"
   else
-    warnl "signing identity \"$SIGN_IDENTITY\" not found: run in Terminal: claude-profiles setup"
+    warnl "signing identity \"${PROFILE_SIGN_IDENTITY:-$SIGN_IDENTITY}\" not found: run in Terminal: claude-profiles setup"
   fi
-  if [[ $SIGN_IDENTITY != - ]] && grep -qxF "Authority=$SIGN_IDENTITY" <<<"$sig"; then
-    ok "$NAME is signed by \"$SIGN_IDENTITY\" (stable signature, no re-prompts on rebuild)"
+  if [[ -z $outer_authority && -n $nested_identity ]] && grep -q 'Signature=adhoc' <<<"$sig"; then
+    if [[ $SIGN_ID != - ]]; then
+      fail "mixed signature: $NAME is signed ad-hoc but its nested code is signed by \"$nested_identity\". Fix: claude-profiles resign $SLUG"
+    else
+      fail "mixed signature: $NAME is signed ad-hoc but its nested code is signed by \"$nested_identity\", which is not usable. Unlock the login keychain then run: claude-profiles resign $SLUG (or: claude-profiles set $SLUG sign-identity NAME)"
+    fi
+  elif [[ $SIGN_ID != - && $outer_authority == "$SIGN_ID" ]]; then
+    ok "$NAME is signed by \"$SIGN_ID\" (stable signature, no re-prompts on rebuild)"
   elif grep -q 'Signature=adhoc' <<<"$sig"; then
     warnl "$NAME is signed ad-hoc: re-prompts on rebuild"
   else
-    warnl "$NAME is signed by neither \"$SIGN_IDENTITY\" nor ad-hoc: $(grep -m1 '^Authority=' <<<"$sig" || print unknown)"
+    warnl "$NAME is signed by \"${outer_authority:-unknown}\", not by the resolved identity \"$SIGN_ID\""
   fi
   if launchctl print "gui/$(id -u)/$AGENT_LABEL" >/dev/null 2>&1; then
     ok "LaunchAgent $AGENT_LABEL is loaded"
@@ -2042,22 +2202,24 @@ cmd_adopt() {
     fi
   fi
 
-  local d
+  local d detected
   for d in $dirs; do
     d=$(abs_path "$d")
     (( ${PROFILE_DIRS[(Ie)$d]} )) || PROFILE_DIRS+=( "$d" )
   done
-  profile_save
-
-  if [[ -n $identity ]]; then
-    if [[ -z $(grep -E '^SIGN_IDENTITY=' "$CONFIG_FILE" 2>/dev/null || true) || $SIGN_IDENTITY == "$DEFAULT_IDENTITY" ]]; then
-      SIGN_IDENTITY=$identity
-      save_config
-      say "SIGN_IDENTITY set to \"$identity\""
+  if [[ -n $identity && $identity != - ]]; then
+    PROFILE_SIGN_IDENTITY=$identity
+    say "Signing identity: \"$identity\" (from --identity)"
+  elif [[ -z $identity ]] && detected=$(app_signing_identity "$app"); then
+    if valid_identity "$detected" && [[ $(probe_identity "$detected") == "$detected" ]]; then
+      PROFILE_SIGN_IDENTITY=$detected
+      say "Signing identity: \"$detected\" (detected from the copy's current signature)"
     else
-      warn "SIGN_IDENTITY is already \"$SIGN_IDENTITY\"; left unchanged."
+      warn "$app is signed by \"$detected\", which is not usable here (missing from the login keychain, or the keychain is locked). Unlock it, then run: claude-profiles set $slug sign-identity \"$detected\""
     fi
   fi
+  profile_save
+
   local kept_slug=$SLUG kept_app=$PROFILE_APP
   regen_rules
   say "Adopted $kept_app as profile \"$kept_slug\" (bundle id $bundle_id). Nothing was rebuilt."
@@ -2426,8 +2588,9 @@ auto_profile() {
     fi
     return 0
   fi
-  if [[ $SIGN_IDENTITY != - && $(probe_sign_id) == - ]]; then
-    log_line "$SLUG: stale ($reason) but identity \"$SIGN_IDENTITY\" is unusable: skipping so the copy is not downgraded to ad-hoc (run setup)"
+  resolve_sign_identity
+  if [[ $SIGN_ID == - && -n $SIGN_BLOCKED ]]; then
+    log_line "$SLUG: stale ($reason) but identity \"$SIGN_BLOCKED\" is unusable: skipping so the copy is not downgraded to ad-hoc (run setup)"
     return 0
   fi
   if (( DRY )); then
@@ -3226,6 +3389,8 @@ main() {
     show) cmd_show "$@" ;;
     build) cmd_build "$@" ;;
     launcher) cmd_launcher "$@" ;;
+    resign) cmd_resign "$@" ;;
+    set) cmd_set "$@" ;;
     recolor) cmd_recolor "$@" ;;
     check) cmd_check "$@" ;;
     link) cmd_link "$@" ;;

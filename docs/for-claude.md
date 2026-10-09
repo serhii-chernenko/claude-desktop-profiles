@@ -32,7 +32,7 @@ These all accept `--yes` and the read-only ones accept `--plain`. Run `bin/claud
 | --- | --- |
 | Inspect state | `status --plain` (CLI install, signing identity, agent, source app, `claude://` handler), `show <slug> --plain`, `scan --plain` |
 | Move session history into an **existing** profile | `projects <slug> list --plain`, then `projects <slug> add --mode symlink\|move\|copy [--no-dir] --yes CWD...` (ask first; `move` and `copy` change session history) |
-| Register a hand-made copy | `scan --plain` prints `candidate` rows (app, launcher, bundle ID, data dir, name); pass them to `adopt --slug s --name N --app PATH [--launcher PATH] [--data-dir P] [--config-dir P]` |
+| Register a hand-made copy | `scan --plain` prints `candidate` rows (app, launcher, bundle ID, data dir, config dir, name, signing identity or `-`); pass them to `adopt --slug s --name N --app PATH [--launcher PATH] [--data-dir P] [--config-dir P] [--identity NAME]` (the identity is detected from the copy when omitted) |
 | Shell hook in `~/.zshrc` | `shell-init status --plain`, then `shell-init install` or `shell-init uninstall` (an idempotent marked block; ask first, because it edits a shell startup file) |
 | Old hand-made LaunchAgents | `legacy-agents --plain` to list, `legacy-agents disable LABEL --yes` to unload and rename one (ask first) |
 | CLI on the PATH | `install-cli` copies the tool to `~/.local/share/claude-profiles` and links `~/.local/bin/claude-profiles` |
@@ -51,7 +51,7 @@ BUNDLE_ID="com.anthropic.claudefordesktop.$SLUG"
 LAUNCHER_ID="$BUNDLE_ID.launcher"
 DATA_DIR="$HOME/Library/Application Support/Claude-${NAME// /-}"
 CONFIG_DIR="$HOME/.claude-$SLUG"
-HUE=<degrees>
+COLOR="#<rrggbb>"
 IDENTITY="Claude Profiles Signing"
 PB=/usr/libexec/PlistBuddy
 LSREG=/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister
@@ -60,7 +60,7 @@ echo "work dir: $WORK"
 ```
 
 - `<Name>` is the display name, for example `Work`. `<slug>` is lowercase `[a-z0-9-]+`, for example `work`.
-- `<degrees>` is the hue rotation applied to the original orange icon. Rough guide: `25` yellow, `100` green, `190` blue, `260` violet, `320` pink.
+- `<rrggbb>` is the exact color the icon's body should get, for example `3a7bd5`.
 - To reuse an existing data or config folder, set `DATA_DIR` or `CONFIG_DIR` to it instead (candidates are listed in step 7).
 
 ## 1. Preflight
@@ -116,27 +116,9 @@ echo "executable: $EXE"
 
 ## 3. Tint the icon
 
-Write the tint script (CoreImage hue rotation) and apply it to every PNG of the icon set:
+Tint every PNG of the icon set with the `color.js tint` command from `lib/` of this repository (inside the app it is `Contents/Resources/cli/lib/color.js`). It samples the dominant color of the source icon and remaps it exactly to `$COLOR` (hue shift plus saturation and value scaling through a `CIColorCube` lookup table), so the white glyph and the edges stay intact:
 
 ```zsh
-cat > "$WORK/tint.js" <<'JXA'
-ObjC.import('AppKit'); ObjC.import('CoreImage');
-function run(argv) {
-  const url = $.NSURL.fileURLWithPath(argv[0]);
-  let image = $.CIImage.imageWithContentsOfURL(url);
-  const hue = $.CIFilter.filterWithName('CIHueAdjust');
-  hue.setValueForKey(image, 'inputImage');
-  hue.setValueForKey($(parseFloat(argv[1]) * Math.PI / 180), 'inputAngle');
-  image = hue.valueForKey('outputImage');
-  const controls = $.CIFilter.filterWithName('CIColorControls');
-  controls.setValueForKey(image, 'inputImage');
-  controls.setValueForKey($(parseFloat(argv[2] || '1')), 'inputSaturation');
-  image = controls.valueForKey('outputImage');
-  const rep = $.NSBitmapImageRep.alloc.initWithCIImage(image);
-  rep.representationUsingTypeProperties($.NSBitmapImageFileTypePNG, $()).writeToFileAtomically(argv[0], true);
-}
-JXA
-
 ICON_FILE=$($PB -c "Print :CFBundleIconFile" "$PLIST" 2>/dev/null || true)
 if [[ -n $ICON_FILE ]]; then
   ICNS="$STAGE/Contents/Resources/${ICON_FILE%.icns}.icns"
@@ -145,11 +127,12 @@ else
   [[ -n $ICNS ]] && $PB -c "Add :CFBundleIconFile string ${ICNS:t}" "$PLIST"
 fi
 iconutil -c iconset "$ICNS" -o "$WORK/icon.iconset"
-for png in "$WORK"/icon.iconset/*.png; do osascript -l JavaScript "$WORK/tint.js" "$png" "$HUE" 1; done
+largest=("$WORK"/icon.iconset/*.png(.OL[1]))
+osascript -l JavaScript lib/color.js tint "$WORK/icon.iconset" "$COLOR" "$largest[1]"
 iconutil -c icns "$WORK/icon.iconset" -o "$ICNS"
 ```
 
-Inside this repository, `osascript -l JavaScript lib/tint.js "$png" "$HUE" 1` does the same. If the icon cannot be tinted, continue: the copy still works, it just looks like the original.
+If the icon cannot be tinted, continue: the copy still works, it just looks like the original.
 
 ## 4. Re-sign inside-out
 
