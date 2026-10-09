@@ -1,4 +1,8 @@
-# claude-desktop-profiles
+# Claude Desktop Profiles
+
+<img width="3200" height="1800" alt="image" src="https://github.com/user-attachments/assets/954ce7d9-e719-458d-ad62-2612de94c726" />
+
+<img width="3200" height="1800" alt="image" src="https://github.com/user-attachments/assets/a8dd256d-150f-4f1c-b18d-e841e40b28bb" />
 
 Run several Claude accounts side by side on macOS, each with its own login, its own Dock icon and its own Claude Code history. Profile names are yours: nothing is hardcoded.
 
@@ -7,6 +11,8 @@ Run several Claude accounts side by side on macOS, each with its own login, its 
 - **Native app, no dependencies**: Claude Profiles is a SwiftUI window over a zsh command-line tool. It needs only what ships with macOS (zsh, `osascript`, PlistBuddy, `codesign`, `iconutil`, `ditto`, `security`, `launchctl`). No Homebrew packages, no Python.
 
 Requires macOS 13 or newer. Desktop profiles also need an installed `/Applications/Claude.app`; terminal-only profiles work without it.
+
+<img width="2400" height="1350" alt="image" src="https://github.com/user-attachments/assets/bca5749e-2b24-41b0-837a-58115123008f" />
 
 ## Three ways to use it
 
