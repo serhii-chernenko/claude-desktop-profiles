@@ -125,6 +125,17 @@ enum SelfTest {
         let status = PlainParser.status("cli_installed\t1\t/h/.local/bin/claude-profiles\ncli_current\t0\nidentity\tClaude Profiles Signing\t1\t0\nagent\tlabel\t1\nsource\t/Applications/Claude.app\t1.0\t1\nhandler\tclaude\tcom.example\nhome\t/h/.config/claude-profiles\nlater\tx")
         expect(status.cliInstalled == true && status.cliCurrent == false && status.identityUsable == false && status.agentLoaded == true && status.sourceTeamOK == true && status.home != nil, "status parser")
 
+        let reorderedStatus = PlainParser.status("home\t/h/.config/claude-profiles\nfuture_row\tnew\tvalues\nhandler\tclaude\tcom.example\textra\nsource\t/Applications/Claude.app\t1.0\t1\textra\nagent\tlabel\t1\textra\ncli_probe\t1\nidentity\tClaude Profiles Signing\t1\t0\t9\ncli_current\t0\textra\nanother_unknown\ncli_installed\t1\t/h/.local/bin/claude-profiles\textra")
+        expect(reorderedStatus.cliInstalled == true && reorderedStatus.cliPath == "/h/.local/bin/claude-profiles" && reorderedStatus.cliCurrent == false, "status parser reads the command-line tool rows by key, in any order")
+        expect(reorderedStatus.identityName == "Claude Profiles Signing" && reorderedStatus.identityPresent == true && reorderedStatus.identityUsable == false, "status parser reads the identity row by key among unknown rows")
+        expect(reorderedStatus.agentLabel == "label" && reorderedStatus.agentLoaded == true && reorderedStatus.sourceTeamOK == true && reorderedStatus.handlerBundleID == "com.example" && reorderedStatus.home == "/h/.config/claude-profiles", "status parser ignores unknown rows and extra columns")
+        let legacyStatus = PlainParser.status("cli_installed\t1\t/h/.local/bin/claude-profiles\nidentity\tClaude Profiles Signing\t1\t1\nagent\tlabel\t1")
+        expect(legacyStatus.cliCurrent == nil && legacyStatus.identityUsable == true && legacyStatus.agentLoaded == true, "status parser tolerates a CLI without the cli_current row")
+        let reorderedShell = PlainParser.shellStatus("future\tx\nconflict\t~/.zshrc:3: alias claude=x\textra\ninstalled\t1\t/h/.zshrc\textra")
+        expect(reorderedShell.installed && reorderedShell.rcFile == "/h/.zshrc" && reorderedShell.conflicts == ["~/.zshrc:3: alias claude=x extra"], "shell-init status parser reads rows by key in any order")
+        let reorderedScan = PlainParser.scan("future\tx\ndata\t/h/data\textra\nproject\t/h/.claude\t/h/dev/app\t2\t-\t-\textra\nconfig\t/h/.claude\t1\textra\nnoise")
+        expect(reorderedScan.configs.count == 1 && reorderedScan.dataDirs == ["/h/data"] && reorderedScan.projects.first?.sessions == 2, "scan parser reads rows by key among unknown rows")
+
         let shell = PlainParser.shellStatus("installed\t1\t/h/.zshrc\nconflict\t~/.zshrc:3: alias claude=x")
         expect(shell.installed && shell.conflicts == ["~/.zshrc:3: alias claude=x"], "shell-init status parser")
 
