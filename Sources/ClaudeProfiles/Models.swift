@@ -63,6 +63,8 @@ struct ProfileDetails: Equatable {
         guard let raw = value(key) else { return nil }
         return raw == "1"
     }
+
+    var usesLegacyLayout: Bool { value("layout") == "legacy" }
 }
 
 struct ProfileProject: Identifiable, Hashable {

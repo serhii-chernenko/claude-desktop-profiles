@@ -2,7 +2,7 @@
 
 Run several Claude accounts side by side on macOS, each with its own login, its own Dock icon and its own Claude Code history. Profile names are yours: nothing is hardcoded.
 
-- **Claude desktop**: every profile is a copy of `/Applications/Claude.app` with its own bundle ID, its own data folder and a tinted icon. A small launcher app starts the copy on the right data folder.
+- **Claude desktop**: every profile is a copy of `/Applications/Claude.app` with its own bundle ID, its own data folder and a tinted icon. A small launcher app starts the copy on the right data folder. The copy is kept in the hidden folder `/Applications/.claude-profiles`, so Spotlight and Raycast show **only one entry per profile**: `Claude <Name>`, which is the launcher.
 - **Claude Code (CLI)**: every profile has its own `CLAUDE_CONFIG_DIR`. A shell hook picks the profile from the folder you are in.
 - **Native app, no dependencies**: Claude Profiles is a SwiftUI window over a zsh command-line tool. It needs only what ships with macOS (zsh, `osascript`, PlistBuddy, `codesign`, `iconutil`, `ditto`, `security`, `launchctl`). No Homebrew packages, no Python.
 
@@ -20,13 +20,13 @@ Requires macOS 13 or newer. Desktop profiles also need an installed `/Applicatio
 
 1. Download `Claude-Profiles-<version>.dmg` from the [Releases](https://github.com/serhii-chernenko/claude-desktop-profiles/releases) page and drag **Claude Profiles** to **Applications**.
 2. Open it from Applications and approve it once with **Open Anyway** (see [First launch](#first-launch-gatekeeper)).
-3. Use the window. Pin the new **Claude `<Name>` Launcher** to the Dock and always start a profile through its launcher.
+3. Use the window. Pin the new **Claude `<Name>`** (the launcher, in `/Applications`) to the Dock and always start a profile through it. The app copy itself is hidden in `/Applications/.claude-profiles`.
 
 ### The window
 
 - **Sidebar.** Your profiles, then **Main Claude** (your regular app and `~/.claude`, read-only: profiles never change it) and **Setup & Settings**. **New Profile** is at the bottom (or press ⌘N).
 - **Create a profile.** Give it a name, pick an **icon color** with the color picker (the tint is applied to the copy's Dock icon and its launcher), and choose what it is for: the desktop app, Claude Code, or both. You can reuse an existing data folder (which keeps its sign-in and chats) or config folder, bring existing projects along (share, move or copy, see below) and list folders that select the profile automatically.
-- **A profile page** has the color picker (recolor takes seconds, no rebuild), **Open**, **Rebuild**, **Check**, **Link Sign-in** / **Back to Main** (sends `claude://` sign-in links to the profile for a while, then back), **Copy Command** (the `claude-<slug>` command), **Remove** (keeps data and history unless you tick the delete boxes), the folders that auto-select the profile, and its Claude Code projects.
+- **A profile page** has the color picker (recolor takes seconds, no rebuild), **Open**, **Move to New Layout** (only for profiles that still use the old layout, see [Where the apps live](#where-the-apps-live)), **Rebuild**, **Check**, **Link Sign-in** / **Back to Main** (sends `claude://` sign-in links to the profile for a while, then back), **Copy Command** (the `claude-<slug>` command), **Remove** (keeps data and history unless you tick the delete boxes), the folders that auto-select the profile, and its Claude Code projects.
 - **Adopt banner.** If the app finds a copy you built by hand earlier (a `Claude <Name>.app` with its own data folder), it shows a banner "Found existing copy". **Adopt** manages it here without rebuilding or changing it; **Not Now** hides the banner.
 - **Project migration.** In a profile, **Add Projects** lists Claude Code projects that have history in other config folders. For the ones you tick, choose **Share** (a symlink: both config folders see the same history from now on), **Move** (the history leaves the old config folder) or **Copy** (an independent copy). You can also add each project folder to the profile's folders so `claude` picks the profile there. Quit Claude Code sessions in those projects first.
 - **Setup & Settings.**
@@ -85,23 +85,24 @@ Every interactive prompt has a flag equivalent. `--yes` means "never prompt" and
 | --- | --- |
 | `new [--name N] [--slug s] [--color '#hex' \| --hue DEG \| --pick-color] [--desktop\|--no-desktop] [--cli\|--no-cli] [--data-dir P] [--config-dir P] [--dir PATH]... [--link PROJECT_CWD]... [--link-mode symlink\|move\|copy] [--no-build] [--yes] [--plain]` | Create a profile and build its app copy and launcher. `--plain` adds a final machine line `created`, the slug and the launcher path (or `-`), tab-separated. `--no-desktop` needs neither Claude.app nor a color. If the profile already exists, run `build <slug>` to retry the build. `--hue DEG` is the target hue of the icon in degrees (at the source icon's own saturation and brightness), not a rotation. `--no-cli` makes a desktop-only profile (no `claude-<slug>` function, no folder rules); `--no-desktop` makes a CLI-only profile |
 | `list [--plain]` | List profiles (the implicit `default` profile is included). `--plain` prints `slug`, `name`, `color`, `desktop` (`1` or `0`), `app`, `config_dir`, `data_dir`, tab-separated. For CLI-only profiles (`desktop` is `0`) `app` and `data_dir` are `-`; `color` is `-` when unset; the `default` row has color `-` |
-| `scan [--plain]` | Find existing config dirs, data dirs and projects with session history. `--plain` rows are `config`, `data` and `project` lines; project dirs without a `.jsonl` transcript are left out, and config dirs without `projects/`, `.claude.json` or `settings.json` are not listed (except the main one) |
-| `show <slug> [--plain]` | Print one profile's settings. `--plain` prints `key<TAB>value` lines, then one `dir` line per folder |
+| `scan [--plain]` | Find existing config dirs, data dirs and projects with session history. Copies are looked up in `APPS_DIR` and `/Applications`, with either layout of launcher. `--plain` rows are `config`, `data` and `project` lines; project dirs without a `.jsonl` transcript are left out, and config dirs without `projects/`, `.claude.json` or `settings.json` are not listed (except the main one) |
+| `show <slug> [--plain]` | Print one profile's settings. `--plain` prints `key<TAB>value` lines, then one `dir` line per folder. The `layout` line is `legacy` (copy and launcher both in `/Applications`) or `hidden` (copy in `APPS_DIR`), and `-` for CLI-only profiles |
 | `projects <slug> list [--plain]` | Claude Code session history stored in the profile's config dir, by project folder. `--plain` rows: `project`, working directory, sessions, last used, `symlink` or `dir` |
 | `projects <slug> add [--mode symlink\|move\|copy] [--no-dir] [--yes] CWD...` | Bring the history of project folders into an **existing** profile (the same operation as `--link` on `new`). `symlink` shares it, `move` reassigns it, `copy` duplicates it. By default each folder is also added to the profile's folders; `--no-dir` skips that. Quit running Claude Code sessions in those projects first |
 | `status [--plain]` | Command-line tool install, signing identity, auto-rebuild agent, source app and the `claude://` handler, with the settings folder |
 | `install-cli [--from DIR] [--prefix DIR] [--share-dir DIR] [--bin-dir DIR]` | Copy the tool (without the quarantine flag) to `~/.local/share/claude-profiles` and link `~/.local/bin/claude-profiles` |
 | `legacy-agents [--plain]` | List other LaunchAgents that watch Claude.app or a profile copy (earlier hand-made setups) |
 | `legacy-agents disable LABEL [--yes]` | Unload one of them and rename its plist to `.disabled`; nothing is deleted |
-| `build <slug>\|--all` | Rebuild the app copy and launcher from the current Claude.app |
+| `build <slug>\|--all` | Rebuild the app copy and launcher from the current Claude.app. A profile in the old layout is moved to the new one first (if an old LaunchAgent blocks the move, the build warns and stays in the old layout) |
+| `migrate-layout <slug> [--yes] [--plain]` | Move a profile from the old layout to the new one: the copy goes into `APPS_DIR`, the old `… Launcher.app` is removed and the launcher is rebuilt as `/Applications/Claude <Name>.app`. Refuses while the copy runs, and exits 3 while a legacy LaunchAgent references the copy or Claude.app (`--plain` prints its `agent` rows; stderr names what to `legacy-agents disable`). Re-pin the launcher in the Dock afterwards |
 | `launcher <slug>` | Rebuild only the launcher (refuses to sign it ad-hoc over an identity-signed copy) |
 | `resign <slug>` | Quick repair of a mixed signature: re-sign only the outer bundle and the launcher with the profile's resolved signing identity; nested code is left untouched |
 | `set <slug> sign-identity NAME\|--clear` | Pin the code-signing certificate used for one profile (`--clear` goes back to automatic) |
 | `recolor <slug> [--color '#hex' \| --hue DEG \| --pick-color]` | Change the icon color in seconds, without a full rebuild (desktop profiles only). The dominant color of the icon becomes exactly the chosen color; `--hue DEG` is the target hue at the original saturation and brightness. The outer bundle is re-signed with the profile's identity |
-| `check <slug>` | Verify profile isolation, signature, agent and version. An ad-hoc outer bundle over identity-signed nested code is reported as FAIL with the fix (`resign`) |
+| `check <slug>` | Verify profile isolation, layout, signature, agent and version. WARN for the old layout (fix: `migrate-layout`), FAIL if the launcher path is the copy itself. An ad-hoc outer bundle over identity-signed nested code is reported as FAIL with the fix (`resign`) |
 | `link <slug>\|main` | Send `claude://` links (sign-in) to a profile copy for `LINK_TTL` (15 minutes by default), or back to regular Claude (desktop profiles only) |
 | `remove <slug> [--delete-data] [--delete-config] [--yes]` | Remove the app copy, launcher and profile entry; data and config are kept unless asked. If `claude://` points at the removed copy it is restored to regular Claude first |
-| `adopt --slug s --name N --app PATH [--launcher PATH] [--data-dir P] [--config-dir P] [--identity NAME] [--color '#hex'] [--dir PATH]...` | Register a hand-made install without rebuilding. Without `--data-dir` the default data dir must already exist. `scan` lists hand-made copies it finds as `candidate` rows (the last column is the signing identity found in the copy, or `-`), ready to adopt. Adopt keeps the identity the copy is signed with (stored per profile as `PROFILE_SIGN_IDENTITY`); `--identity NAME` overrides it |
+| `adopt --slug s --name N --app PATH [--launcher PATH] [--data-dir P] [--config-dir P] [--identity NAME] [--color '#hex'] [--dir PATH]...` | Register a hand-made install without rebuilding. Either layout is accepted (copy in `APPS_DIR` with a launcher in `/Applications`, or both in `/Applications`); without `--launcher` the launcher is looked up next to the copy (`… Launcher.app`) and in `/Applications` under the copy's name. Without `--data-dir` the default data dir must already exist. `scan` lists hand-made copies it finds as `candidate` rows (the last column is the signing identity found in the copy, or `-`), ready to adopt. Adopt keeps the identity the copy is signed with (stored per profile as `PROFILE_SIGN_IDENTITY`); `--identity NAME` overrides it |
 | `setup [--identity NAME]` | One-time, terminal only: signing identity and the auto-rebuild LaunchAgent |
 | `auto [--dry-run]` | What the LaunchAgent runs: rebuild stale profiles, fix wrong-profile launches |
 | `uninstall-agent` | Remove the LaunchAgent |
@@ -119,6 +120,7 @@ Every interactive prompt has a flag equivalent. `--yes` means "never prompt" and
 | New Profile | `new ... --yes` |
 | Icon color (desktop profiles) | `recolor <slug> --color '#hex'` |
 | Rebuild (desktop profiles) | `build <slug>` or `build --all` |
+| Move to New Layout (old-layout profiles) | `migrate-layout <slug> --yes --plain` (the `agent` rows of a blocked run list the agents to disable) |
 | Check | `check <slug>` |
 | Link Sign-in / Back to Main (desktop profiles) | `link <slug>` or `link main` |
 | Remove | `remove <slug> [--delete-data] [--delete-config]` |
@@ -128,6 +130,19 @@ Every interactive prompt has a flag equivalent. `--yes` means "never prompt" and
 | Settings: Shell integration | `shell-init install`, `shell-init uninstall` and `shell-init status` |
 | Settings: Set Up | `install-cli`, then Terminal opens and runs `setup` from `~/.local/share/claude-profiles` (the LaunchAgent points there, not into the app) |
 | Settings: Old LaunchAgents | `legacy-agents` and `legacy-agents disable LABEL` |
+
+## Where the apps live
+
+Each desktop profile has two apps:
+
+| App | Path | Purpose |
+| --- | --- | --- |
+| The copy | `$APPS_DIR/Claude <Name>.app` (default `APPS_DIR` is `/Applications/.claude-profiles`) | The real Claude copy. It is registered with Launch Services but sits in a dot-folder, which Spotlight does not index and Finder hides, so it never shows up in search |
+| The launcher | `/Applications/Claude <Name>.app` | Named exactly like the profile, bundle ID `<copy bundle ID>.launcher`. It is the only entry in Spotlight and Raycast, and the app to pin to the Dock |
+
+The copy's own name stays `Claude <Name>`, so the Dock and ⌘-Tab show the same name while it runs. The launcher finds the copy by bundle ID, not by path. `APPS_DIR` is a key in `~/.config/claude-profiles/config.env`.
+
+Older versions put both apps in `/Applications`, as `Claude <Name>.app` and `Claude <Name> Launcher.app`. Move such a profile with `claude-profiles migrate-layout <slug>` (or **Move to New Layout** in the app); `build` does the same move first when it finds the old layout. The move keeps the copy's signature and designated requirement (nothing is rebuilt or re-signed), so Keychain and privacy permissions stay as they are. It refuses while the copy is running, and while an old LaunchAgent references the copy or Claude.app (it would recreate the copy at the old path): disable it first, see `legacy-agents`. **After the move, re-pin the launcher in the Dock**: the old Dock item pointed at the removed `… Launcher.app`.
 
 ## Updates and auto-rebuild
 
@@ -172,6 +187,9 @@ The hook reads only `~/.config/claude-profiles/rules.tsv`, so it adds no measura
 | --- | --- |
 | `CLAUDE_PROFILES_HOME` | Settings folder (default `~/.config/claude-profiles`) |
 | `CLAUDE_PROFILES_LOG` | Log file (default `~/Library/Logs/claude-profiles.log`) |
+| `CLAUDE_PROFILES_APPS_DIR` | Overrides `APPS_DIR`, the folder for the app copies (default `/Applications/.claude-profiles`, or the `APPS_DIR` key of `config.env`). For tests |
+| `CLAUDE_PROFILES_LAUNCHER_DIR` | Folder for the launchers (default `/Applications`). For tests |
+| `CLAUDE_PROFILES_AGENTS_DIR` | Folder scanned for old LaunchAgents (default `~/Library/LaunchAgents`). For tests |
 | `CLAUDE_PROFILES_NO_URL_SET` | When set, the CLI never changes the `claude://` handler (for tests); it only prints what it would have done |
 | `CLAUDE_PROFILES_MODE` | Shell hook only: `auto`, `warn` or `off`, overrides `CLI_RULE_MODE` |
 
@@ -189,7 +207,7 @@ The `claude-profiles.bak` backups: when a project is linked, edited `.claude.jso
 
 **The Dock or Finder shows the old icon.** Run `killall Dock` (or `claude-profiles recolor <slug> --color <hex>`, which also refreshes Launch Services and the Dock). If it persists, restart the Dock after quitting the copy.
 
-**I opened the copy from Spotlight/Finder and it shows my main account.** A bare launch of the copy runs it on the main data folder at the same time as the real Claude. Quit it and open the **Launcher**. With the LaunchAgent installed, `auto` detects this within moments and reopens the copy correctly.
+**I opened the copy from Spotlight/Finder and it shows my main account.** A bare launch of the copy runs it on the main data folder at the same time as the real Claude. Quit it and open the launcher (`Claude <Name>`). In the new layout the copy is hidden from search, so this mostly happens through `claude://` links or session restore. With the LaunchAgent installed, `auto` detects this within moments and reopens the copy correctly.
 
 **My window manager (StageFit, Rectangle, or any Accessibility-based tool) cannot see the copy's windows.** The copy's executable must be the real Electron binary, which this tool guarantees. A wrapper script that `exec`s the binary makes Launch Services register the app with PID 0, and accessibility clients lose track of it. If you hand-edited the copy, rebuild it with `claude-profiles build <slug>`.
 
@@ -200,6 +218,8 @@ The `claude-profiles.bak` backups: when a project is linked, edited `.claude.jso
 **Set Up opens Terminal and `setup` stops with "disk image or translocated app".** Move **Claude Profiles.app** to Applications, open it from there and press **Set Up** again. It installs the command-line tool first, and `setup` runs from that installed copy.
 
 **Shell integration is on but `claude` does not pick the profile.** Another definition of `claude` (an alias or function in a shell startup file) overrides it. The Settings tab, or `claude-profiles shell-init status`, shows where; remove or rename it, then open a new Terminal window.
+
+**Search shows two entries per profile, or the Dock item stopped working.** The profile still uses the old layout (`show <slug>` prints `layout legacy`; `check` warns): run `claude-profiles migrate-layout <slug>`, then remove the old Dock item and pin `Claude <Name>` again. If it stops with an old LaunchAgent, disable that agent first (`claude-profiles legacy-agents`).
 
 **Old hand-made LaunchAgents rebuild or quit my copies.** List them with `claude-profiles legacy-agents` (or in Settings) and disable them one by one with `legacy-agents disable LABEL`.
 

@@ -54,6 +54,8 @@ final class AppModel: ObservableObject {
     @Published var sheet: ActiveSheet?
     @Published var dismissedCandidates: Set<String> = []
     @Published var loadError: String?
+    @Published var layoutBlocks: [String: [LegacyAgent]] = [:]
+    @Published var settingsScrollTarget: String?
 
     let runner: CLIRunner?
     private(set) var nextLogID = 0
@@ -226,6 +228,23 @@ final class AppModel: ObservableObject {
 
     func recolor(_ profile: Profile, hex: String) async {
         await run("Recolor \(profile.name)", ["recolor", profile.slug, "--color", hex])
+    }
+
+    func migrateLayout(_ profile: Profile) async {
+        layoutBlocks[profile.slug] = nil
+        guard let result = await run("Move \(profile.name) to the new layout", ["migrate-layout", profile.slug, "--yes", "--plain"], showsAlert: false) else { return }
+        guard !result.succeeded else { return }
+        let blockers = PlainParser.legacyAgents(result.stdout)
+        if blockers.isEmpty {
+            failure = CommandFailure(title: "Move to new layout failed", message: result.failureSummary)
+        } else {
+            layoutBlocks[profile.slug] = blockers
+        }
+    }
+
+    func showLegacyAgents() {
+        settingsScrollTarget = SettingsView.legacyAgentsAnchor
+        selection = .settings
     }
 
     func startSetup() async {

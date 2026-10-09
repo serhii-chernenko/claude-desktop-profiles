@@ -18,6 +18,7 @@ struct ProfileDetailView: View {
     private var cliEnabled: Bool { details?.flag("cli") ?? !profile.isDesktop }
     private var launcher: String? { details?.value("launcher") }
     private var projects: [ProfileProject] { model.profileProjects[profile.slug] ?? [] }
+    private var usesLegacyLayout: Bool { profile.isDesktop && (details?.usesLegacyLayout ?? false) }
 
     var body: some View {
         Form {
@@ -118,6 +119,19 @@ struct ProfileDetailView: View {
                     }
                     .disabled(model.isBusy)
                 }
+                if usesLegacyLayout {
+                    ActionRow(title: "Move to new layout",
+                              caption: "Hides the app copy from Spotlight/Raycast; the launcher becomes 'Claude \(profile.name)'",
+                              systemImage: "eye.slash") {
+                        Button("Move to New Layout") {
+                            Task { await model.migrateLayout(profile) }
+                        }
+                        .disabled(model.isBusy)
+                    }
+                    if let blockers = model.layoutBlocks[profile.slug], !blockers.isEmpty {
+                        layoutBlockNotice(blockers)
+                    }
+                }
                 ActionRow(title: "Rebuild",
                           caption: "Recreates the app copy and launcher from the current Claude.app. Sign-in and history are kept.",
                           systemImage: "arrow.triangle.2.circlepath") {
@@ -154,6 +168,23 @@ struct ProfileDetailView: View {
                 .disabled(model.isBusy)
             }
         }
+    }
+
+    private func layoutBlockNotice(_ blockers: [LegacyAgent]) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Label("Disable these old LaunchAgents first. They would recreate the copy at its old path.", systemImage: "exclamationmark.triangle.fill")
+                .foregroundStyle(.orange)
+                .font(.callout)
+            ForEach(blockers) { agent in
+                Text(agent.label)
+                    .font(.system(.callout, design: .monospaced))
+                    .textSelection(.enabled)
+            }
+            Button("Show Old LaunchAgents") {
+                model.showLegacyAgents()
+            }
+        }
+        .padding(.vertical, 2)
     }
 
     private var paths: some View {

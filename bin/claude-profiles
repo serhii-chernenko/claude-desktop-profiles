@@ -12,6 +12,7 @@
 #   show <slug> [--plain]               profile details (--plain: key<TAB>value lines, then one dir line per folder)
 #   build <slug>|--all                  (re)build the desktop copy and its launcher
 #   launcher <slug>                     rebuild only the launcher
+#   migrate-layout <slug> [--yes] [--plain]   move the app copy into the hidden apps dir; the launcher becomes "Claude <Name>"
 #   resign <slug>                       re-sign only the outer bundle and the launcher with the resolved identity
 #   set <slug> sign-identity NAME|--clear   pin the signing identity of one profile
 #   recolor <slug> [--color '#hex'|--hue DEG|--pick-color]
@@ -40,7 +41,10 @@
 #
 # --yes never prompts. --plain prints tab-separated output without colors.
 # Exit codes: 0 ok, 1 error, 2 usage. Config: $CLAUDE_PROFILES_HOME (~/.config/claude-profiles).
-# Test overrides: CLAUDE_PROFILES_AGENTS_DIR (LaunchAgents dir), CLAUDE_PROFILES_APPS_DIR (apps dir scanned for copies).
+# Layout: the copy lives in APPS_DIR (config.env, default /Applications/.claude-profiles, hidden from search);
+# the launcher lives in /Applications and is named like the profile ("Claude <Name>").
+# Test overrides: CLAUDE_PROFILES_AGENTS_DIR (LaunchAgents dir), CLAUDE_PROFILES_APPS_DIR (overrides APPS_DIR),
+# CLAUDE_PROFILES_LAUNCHER_DIR (launcher dir, default /Applications).
 #
 setopt extended_glob
 set -euo pipefail
@@ -69,7 +73,10 @@ PB=/usr/libexec/PlistBuddy
 LSREG=/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister
 KEYCHAIN=$HOME/Library/Keychains/login.keychain-db
 AGENTS_DIR=${CLAUDE_PROFILES_AGENTS_DIR:-$HOME/Library/LaunchAgents}
-APPS_DIR=${CLAUDE_PROFILES_APPS_DIR:-/Applications}
+DEFAULT_APPS_DIR=/Applications/.claude-profiles
+APPS_DIR=${CLAUDE_PROFILES_APPS_DIR:-$DEFAULT_APPS_DIR}
+CONFIG_APPS_DIR=$DEFAULT_APPS_DIR
+LAUNCHER_DIR=${CLAUDE_PROFILES_LAUNCHER_DIR:-/Applications}
 DEFAULT_SHARE_DIR=$HOME/.local/share/claude-profiles
 DEFAULT_BIN_DIR=$HOME/.local/bin
 RC_BEGIN='# >>> claude-profiles >>>'
@@ -95,6 +102,7 @@ PARENT_LOCK=${CLAUDE_PROFILES_LOCKED:-0}
 LOCK_HELD=0
 CLEANUP_PATHS=()
 TS_ARGS=()
+LAYOUT_BLOCKED=0
 TMP=""
 
 C_RESET= C_BOLD= C_DIM= C_RED= C_GREEN= C_YELLOW= C_CYAN=
@@ -200,8 +208,20 @@ load_config() {
   CLI_RULE_MODE=auto
   LINK_TTL=900
   SOURCE_TEAM_ID=$DEFAULT_SOURCE_TEAM_ID
+  APPS_DIR=$DEFAULT_APPS_DIR
   if [[ -r $CONFIG_FILE ]]; then
     source "$CONFIG_FILE"
+  fi
+  APPS_DIR=${APPS_DIR/#\~/$HOME}
+  CONFIG_APPS_DIR=$APPS_DIR
+  if [[ -n ${CLAUDE_PROFILES_APPS_DIR:-} ]]; then
+    APPS_DIR=$CLAUDE_PROFILES_APPS_DIR
+  fi
+  APPS_DIR=${APPS_DIR%/}
+  LAUNCHER_DIR=${LAUNCHER_DIR%/}
+  [[ $APPS_DIR == /* && $APPS_DIR != *[[:cntrl:]]* ]] || die "APPS_DIR in $CONFIG_FILE must be an absolute path without control characters."
+  if same_path "$APPS_DIR" "$LAUNCHER_DIR"; then
+    die "APPS_DIR ($APPS_DIR) must differ from the launcher folder ($LAUNCHER_DIR): the copy and its launcher would share one path."
   fi
   [[ $LINK_TTL == <-> ]] || LINK_TTL=900
   valid_identity "$SIGN_IDENTITY" || die "SIGN_IDENTITY in $CONFIG_FILE must be - or use only letters, digits, space, dot, underscore and dash."
@@ -219,6 +239,7 @@ save_config() {
     print -r -- "CLI_RULE_MODE=${(qqq)CLI_RULE_MODE}"
     print -r -- "LINK_TTL=$LINK_TTL"
     print -r -- "SOURCE_TEAM_ID=${(qqq)SOURCE_TEAM_ID}"
+    print -r -- "APPS_DIR=${(qqq)CONFIG_APPS_DIR}"
   } > "$CONFIG_FILE.tmp"
   mv -f -- "$CONFIG_FILE.tmp" "$CONFIG_FILE"
 }
@@ -430,8 +451,14 @@ profile_fill_defaults() {
   : ${PROFILE_NAME:=$SLUG}
   : ${PROFILE_DESKTOP:=1}
   : ${PROFILE_CLI:=1}
-  : ${PROFILE_APP:=/Applications/Claude $PROFILE_NAME.app}
-  : ${PROFILE_LAUNCHER:=${PROFILE_APP%.app} Launcher.app}
+  : ${PROFILE_APP:=$APPS_DIR/Claude $PROFILE_NAME.app}
+  if [[ -z $PROFILE_LAUNCHER ]]; then
+    if same_path "${PROFILE_APP:h}" "$LAUNCHER_DIR"; then
+      PROFILE_LAUNCHER="${PROFILE_APP%.app} Launcher.app"
+    else
+      PROFILE_LAUNCHER="$LAUNCHER_DIR/${PROFILE_APP:t}"
+    fi
+  fi
   : ${PROFILE_BUNDLE_ID:=$BUNDLE_ID_PREFIX.$SLUG}
   : ${PROFILE_DATA_DIR:=$HOME/Library/Application Support/Claude-${PROFILE_NAME// /-}}
   : ${PROFILE_CONFIG_DIR:=$HOME/.claude-$SLUG}
@@ -478,6 +505,18 @@ profile_field() {
 
 launcher_id() {
   print -r -- "$PROFILE_BUNDLE_ID.launcher"
+}
+
+layout_of_profile() {
+  if same_path "${PROFILE_APP:h}" "$APPS_DIR" && ! same_path "$PROFILE_APP" "$PROFILE_LAUNCHER"; then
+    print -r -- hidden
+  else
+    print -r -- legacy
+  fi
+}
+
+has_old_launcher_naming() {
+  [[ $PROFILE_LAUNCHER == "${PROFILE_APP%.app} Launcher.app" ]]
 }
 
 regen_rules() {
@@ -777,6 +816,9 @@ build_launcher() {
   local icns=${1:-} L=$PROFILE_LAUNCHER LID
   LID=$(launcher_id)
   assert_app_path "$L"
+  if same_path "$L" "$PROFILE_APP"; then
+    die "The launcher path $L is the app copy itself; building the launcher there would delete the copy. Move the copy: claude-profiles migrate-layout $SLUG"
+  fi
   assert_ours "$L" "$LID"
   say "Building launcher..."
   local script=$TMP/launcher.applescript bid open_tail
@@ -818,15 +860,174 @@ EOF
   "$LSREG" -f "$L" >/dev/null 2>&1 || true
 }
 
+report_layout_blockers() {
+  local i state t=$'\t'
+  if (( PLAIN )); then
+    for (( i = 1; i <= ${#LA_LABEL}; i++ )); do
+      print -r -- "agent${t}$LA_LABEL[i]${t}$LA_PLIST[i]${t}$LA_LOADED[i]${t}$LA_PROGRAM[i]"
+    done
+  fi
+  print -u2 -r -- "WARN:  Cannot move \"$SLUG\" to the new layout yet. These old LaunchAgents reference ${PROFILE_APP:t} or $SOURCE_APP and would recreate the copy at the old path, next to the new launcher:"
+  for (( i = 1; i <= ${#LA_LABEL}; i++ )); do
+    state="not loaded"
+    [[ $LA_LOADED[i] == 1 ]] && state=loaded
+    print -u2 -r -- "  $LA_LABEL[i]  ($state, $(tilde "$LA_PLIST[i]"))"
+  done
+  print -u2 -r -- "Disable each one, then run: claude-profiles migrate-layout $SLUG"
+  for (( i = 1; i <= ${#LA_LABEL}; i++ )); do
+    print -u2 -r -- "  claude-profiles legacy-agents disable ${(q-)LA_LABEL[i]}"
+  done
+}
+
+migrate_layout() {
+  local mode=${1:-command}
+  local old_app=$PROFILE_APP old_launcher=$PROFILE_LAUNCHER LID new_app new_launcher
+  local have_old=0 have_new=0 verified_before=0 pin_note=0
+  LAYOUT_BLOCKED=0
+  LID=$(launcher_id)
+  new_app=$APPS_DIR/${old_app:t}
+  new_launcher=$LAUNCHER_DIR/${old_app:t}
+  assert_app_path "$new_app"
+  assert_app_path "$new_launcher"
+  [[ -d $old_app ]] && have_old=1
+  [[ -d $new_app ]] && have_new=1
+  if (( have_old && have_new )); then
+    die "Both $old_app and $new_app exist. Remove the one you do not need, then re-run."
+  fi
+  if (( ! have_old && ! have_new )) && [[ $mode == command ]]; then
+    die "$old_app not found. Build it first: claude-profiles build $SLUG"
+  fi
+  if (( have_new )); then
+    PROFILE_APP=$new_app
+  fi
+  if (( have_old || have_new )); then
+    assert_ours "$PROFILE_APP" "$PROFILE_BUNDLE_ID"
+    if is_running "$PROFILE_APP"; then
+      die "Quit \"${old_app:t:r}\" first, then re-run."
+    fi
+    legacy_agents_collect "$old_app"
+    if (( ${#LA_LABEL} )); then
+      report_layout_blockers
+      if [[ $mode == command ]]; then
+        exit 3
+      fi
+      LAYOUT_BLOCKED=1
+      PROFILE_APP=$old_app
+      return 0
+    fi
+  fi
+  if [[ -e $new_launcher ]] && ! same_path "$new_launcher" "$old_app"; then
+    assert_ours "$new_launcher" "$LID"
+  fi
+  if (( have_old || have_new )); then
+    if [[ $mode == command ]]; then
+      choose_sign_id keep
+    else
+      choose_sign_id
+    fi
+  fi
+
+  mkdir -p -- "$APPS_DIR" || die "Could not create $APPS_DIR. Create it yourself (it needs to be writable by you), then re-run."
+  if (( have_old )); then
+    codesign --verify --deep --strict "$old_app" >/dev/null 2>&1 && verified_before=1
+    say "Moving ${old_app:t} into $APPS_DIR..."
+    if ! mv -- "$old_app" "$new_app" 2>/dev/null; then
+      say "mv failed; copying with ditto instead..."
+      rm -rf -- "$new_app"
+      if ! ditto "$old_app" "$new_app"; then
+        rm -rf -- "$new_app"
+        die "Could not copy $old_app to $new_app; the original was left in place."
+      fi
+      rm -rf -- "$old_app"
+    fi
+    PROFILE_APP=$new_app
+  fi
+  if (( have_old || have_new )); then
+    if codesign --verify --deep --strict "$new_app" >/dev/null 2>&1; then
+      say "Signature verified at the new path (codesign --verify --deep --strict)."
+    elif (( verified_before )); then
+      if mv -- "$new_app" "$old_app" 2>/dev/null; then
+        PROFILE_APP=$old_app
+        die "The signature of the copy no longer verifies at $new_app; moved it back to $old_app. Nothing else was changed."
+      fi
+      die "The signature of the copy no longer verifies at $new_app and it could not be moved back to $old_app. Rebuild it: claude-profiles build $SLUG"
+    else
+      warn "codesign --verify --deep --strict does not pass for $new_app (it did not pass before the move either)."
+    fi
+    "$LSREG" -f "$new_app" >/dev/null 2>&1 || true
+    "$LSREG" -u "$old_app" >/dev/null 2>&1 || true
+  fi
+
+  if [[ -e $old_launcher ]] && ! same_path "$old_launcher" "$new_launcher" && ! same_path "$old_launcher" "$new_app"; then
+    if [[ ${(L)$(plist_get "$old_launcher" CFBundleIdentifier)} == ${(L)LID} ]]; then
+      pin_note=1
+      "$LSREG" -u "$old_launcher" >/dev/null 2>&1 || true
+      rm -rf -- "$old_launcher"
+      say "Removed the old launcher ${old_launcher:t}"
+    else
+      warn "${old_launcher:t} is not this tool's launcher for \"$SLUG\" (bundle id $(plist_get "$old_launcher" CFBundleIdentifier)); left in place. Delete it yourself to get a single entry in search."
+    fi
+  fi
+
+  PROFILE_APP=$new_app
+  PROFILE_LAUNCHER=$new_launcher
+  profile_save
+  regen_rules
+  if (( have_old || have_new )); then
+    build_launcher "$(copy_icns_path "$new_app")"
+    if (( ! IS_AUTO )); then
+      killall Dock 2>/dev/null || true
+    fi
+  fi
+  say "New layout: copy $new_app, launcher $new_launcher"
+  if (( pin_note )); then
+    say "Note: re-pin '${new_launcher:t:r}' in the Dock. The old Dock item pointed at the removed launcher: remove it, then drag $new_launcher into the Dock."
+  fi
+  if (( pin_note && IS_AUTO )); then
+    notify "${new_launcher:t:r} moved to the new layout: re-pin it in the Dock (the old Dock item no longer works)." "${new_launcher:t:r}"
+  fi
+}
+
+cmd_migrate_layout() {
+  local target=""
+  while (( $# )); do
+    case $1 in
+      --yes|-y) YES=1; shift ;;
+      --plain) PLAIN=1; shift ;;
+      -*) usage_error "migrate-layout <slug> [--yes] [--plain]" ;;
+      *) target=$1; shift ;;
+    esac
+  done
+  [[ -n $target ]] || usage_error "migrate-layout <slug> [--yes] [--plain]"
+  setup_colors
+  profile_load "$target"
+  (( PROFILE_DESKTOP )) || die "Profile \"$SLUG\" has no desktop app."
+  if [[ $(layout_of_profile) == hidden ]]; then
+    say "\"$SLUG\" already uses the new layout: copy $PROFILE_APP, launcher $PROFILE_LAUNCHER"
+    return 0
+  fi
+  confirm "Move ${PROFILE_APP:t} into $APPS_DIR and rebuild its launcher as ${PROFILE_APP:t} in $LAUNCHER_DIR?" || { say "Cancelled."; return 0; }
+  need_lock
+  migrate_layout command
+}
+
 build_profile() {
   profile_load "$1"
   (( PROFILE_DESKTOP )) || die "Profile \"$SLUG\" has no desktop app (CLI only)."
   [[ -d $SOURCE_APP ]] || die "Not found: $SOURCE_APP"
   source_team_ok || die "$SOURCE_APP is not validly signed by Apple Team ID $SOURCE_TEAM_ID (SOURCE_TEAM_ID in $CONFIG_FILE). Refusing to copy it. Set SOURCE_TEAM_ID to the right Team ID, or to an empty value to disable this check."
+  if [[ $(layout_of_profile) == legacy ]] && has_old_launcher_naming; then
+    say "Old layout found: moving the copy into $APPS_DIR first."
+    migrate_layout build
+    if (( LAYOUT_BLOCKED )); then
+      warn "Rebuilding in the old layout for now. After disabling the agents above, run: claude-profiles migrate-layout $SLUG"
+    fi
+  fi
   local DST=$PROFILE_APP NAME=${PROFILE_APP:t:r}
   assert_app_path "$DST"
   assert_ours "$DST" "$PROFILE_BUNDLE_ID"
   assert_ours "$PROFILE_LAUNCHER" "$(launcher_id)"
+  mkdir -p -- "${DST:h}" || die "Could not create ${DST:h}."
   if same_path "$PROFILE_DATA_DIR" "$MAIN_DATA_DIR"; then
     die "PROFILE_DATA_DIR is the main Claude data dir; pick another one."
   fi
@@ -936,7 +1137,7 @@ build_profile() {
   say "Data: $PROFILE_DATA_DIR"
   say "Config: $PROFILE_CONFIG_DIR"
   if (( ! IS_AUTO )); then
-    say "Next: pin '${PROFILE_LAUNCHER:t:r}' to the Dock (not '$NAME'), open it, then run: claude-profiles check $SLUG"
+    say "Next: pin '${PROFILE_LAUNCHER:t:r}' (${PROFILE_LAUNCHER:h}) to the Dock, open it, then run: claude-profiles check $SLUG"
   fi
 }
 
@@ -1135,10 +1336,16 @@ is_profile_app() {
 
 scan_candidates() {
   SC_CAND=()
-  local app bundle_id launcher decompiled data_dir config_dir identity name base t=$'\t'
-  local source_id
+  local app bundle_id launcher decompiled data_dir config_dir identity name base dir t=$'\t'
+  local source_id old_launcher new_launcher
+  local -a apps dirs
   source_id=$(src_id)
-  for app in "$APPS_DIR"/*.app(N-/); do
+  dirs=( "$APPS_DIR" )
+  same_path "$LAUNCHER_DIR" "$APPS_DIR" || dirs+=( "$LAUNCHER_DIR" )
+  for dir in $dirs; do
+    apps+=( "$dir"/*.app(N-/) )
+  done
+  for app in $apps; do
     base=${app:t:r}
     has_control_chars "$base" && continue
     bundle_id=$(plist_get "$app" CFBundleIdentifier)
@@ -1149,8 +1356,14 @@ scan_candidates() {
     is_profile_app "$app" "$bundle_id" && continue
     launcher=- data_dir= config_dir= identity=
     identity=$(usable_app_identity "$app" || true)
-    if [[ -d "${app%.app} Launcher.app" ]]; then
-      launcher="${app%.app} Launcher.app"
+    old_launcher="${app%.app} Launcher.app"
+    new_launcher="$LAUNCHER_DIR/${app:t}"
+    if [[ -d $old_launcher ]]; then
+      launcher=$old_launcher
+    elif ! same_path "$new_launcher" "$app" && [[ -d $new_launcher && ${(L)$(plist_get "$new_launcher" CFBundleIdentifier)} == ${(L)bundle_id}.launcher ]]; then
+      launcher=$new_launcher
+    fi
+    if [[ $launcher != - ]]; then
       decompiled=$(osadecompile "$launcher/Contents/Resources/Scripts/main.scpt" 2>/dev/null || true)
       data_dir=$(launcher_setting "$decompiled" '--user-data-dir=')
       config_dir=$(launcher_setting "$decompiled" 'CLAUDE_CONFIG_DIR=')
@@ -1293,6 +1506,7 @@ cmd_show() {
       print -r -- "cli${t}1"
       print -r -- "app${t}$SOURCE_APP"
       print -r -- "launcher${t}-"
+      print -r -- "layout${t}-"
       print -r -- "bundle_id${t}$(src_id)"
       print -r -- "data_dir${t}$MAIN_DATA_DIR"
       print -r -- "config_dir${t}$MAIN_CONFIG_DIR"
@@ -1307,9 +1521,10 @@ cmd_show() {
   fi
   profile_load "$slug"
   if (( PLAIN )); then
-    local app=$PROFILE_APP launcher=$PROFILE_LAUNCHER bundle_id=$PROFILE_BUNDLE_ID data_dir=$PROFILE_DATA_DIR d
+    local app=$PROFILE_APP launcher=$PROFILE_LAUNCHER bundle_id=$PROFILE_BUNDLE_ID data_dir=$PROFILE_DATA_DIR layout d
+    layout=$(layout_of_profile)
     if (( ! PROFILE_DESKTOP )); then
-      app=- launcher=- bundle_id=- data_dir=-
+      app=- launcher=- bundle_id=- data_dir=- layout=-
     fi
     print -r -- "slug${t}$SLUG"
     print -r -- "name${t}$PROFILE_NAME"
@@ -1319,6 +1534,7 @@ cmd_show() {
     print -r -- "cli${t}$PROFILE_CLI"
     print -r -- "app${t}$app"
     print -r -- "launcher${t}$launcher"
+    print -r -- "layout${t}$layout"
     print -r -- "bundle_id${t}$bundle_id"
     print -r -- "data_dir${t}$data_dir"
     print -r -- "config_dir${t}$PROFILE_CONFIG_DIR"
@@ -1346,6 +1562,13 @@ cmd_show() {
   say "cli         $PROFILE_CLI"
   say "app         $PROFILE_APP ($state)"
   say "launcher    $PROFILE_LAUNCHER"
+  if (( PROFILE_DESKTOP )); then
+    if [[ $(layout_of_profile) == legacy ]]; then
+      say "layout      legacy (run: claude-profiles migrate-layout $SLUG)"
+    else
+      say "layout      hidden"
+    fi
+  fi
   say "bundle_id   $PROFILE_BUNDLE_ID"
   say "data_dir    $PROFILE_DATA_DIR"
   say "config_dir  $PROFILE_CONFIG_DIR"
@@ -1854,6 +2077,16 @@ cmd_check() {
     return 0
   fi
   [[ -d $DST ]] || die "$DST not found. Build it first: claude-profiles build $SLUG"
+  if same_path "$PROFILE_LAUNCHER" "$DST"; then
+    fail "the launcher path is the copy itself ($PROFILE_LAUNCHER): rebuilding the launcher would delete the copy. Fix the profile paths with: claude-profiles migrate-layout $SLUG"
+  elif [[ -d $PROFILE_LAUNCHER && ${(L)$(plist_get "$PROFILE_LAUNCHER" CFBundleIdentifier)} == ${(L)PROFILE_BUNDLE_ID} ]]; then
+    fail "$PROFILE_LAUNCHER holds a copy of Claude (bundle id $PROFILE_BUNDLE_ID), not a launcher. Fix: claude-profiles build $SLUG"
+  fi
+  if [[ $(layout_of_profile) == legacy ]]; then
+    warnl "old layout: Spotlight and Raycast list two entries ('$NAME' and the launcher). Fix: claude-profiles migrate-layout $SLUG"
+  else
+    ok "layout: the copy is hidden in ${DST:h}; '${PROFILE_LAUNCHER:t:r}' is the only entry in search"
+  fi
   if [[ -n $(ls -A "$DATA" 2>/dev/null) ]]; then
     ok "data dir is populated ($DATA)"
   else
@@ -2067,6 +2300,9 @@ cmd_remove() {
   fi
   if (( PROFILE_DESKTOP )); then
     [[ ! -e $PROFILE_APP ]] || { assert_app_path "$PROFILE_APP"; assert_ours "$PROFILE_APP" "$PROFILE_BUNDLE_ID"; }
+    if same_path "$PROFILE_LAUNCHER" "$PROFILE_APP"; then
+      die "The launcher path of \"$SLUG\" is the copy itself ($PROFILE_LAUNCHER). Fix the profile entry before removing it."
+    fi
     [[ ! -e $PROFILE_LAUNCHER ]] || { assert_app_path "$PROFILE_LAUNCHER"; assert_ours "$PROFILE_LAUNCHER" "$(launcher_id)"; }
   fi
   local summary="Remove profile \"$SLUG\" ($PROFILE_NAME)"
@@ -2096,6 +2332,9 @@ cmd_remove() {
         say "Removed $app"
       fi
     done
+    if same_path "${PROFILE_APP:h}" "$APPS_DIR"; then
+      rmdir -- "$APPS_DIR" 2>/dev/null || true
+    fi
   fi
   if (( delete_data )) && [[ -e $PROFILE_DATA_DIR ]]; then
     rm -rf -- "$PROFILE_DATA_DIR"
@@ -2177,7 +2416,17 @@ cmd_adopt() {
   PROFILE_CLI=1
   PROFILE_APP=$app
   PROFILE_BUNDLE_ID=$bundle_id
-  [[ -n $launcher ]] && PROFILE_LAUNCHER=$(abs_path "$launcher")
+  if [[ -n $launcher ]]; then
+    PROFILE_LAUNCHER=$(abs_path "$launcher")
+    same_path "$PROFILE_LAUNCHER" "$app" && die "--launcher must not be the copy itself ($app)."
+  else
+    local legacy_launcher="${app%.app} Launcher.app" hidden_launcher="$LAUNCHER_DIR/${app:t}"
+    if [[ -d $legacy_launcher ]]; then
+      PROFILE_LAUNCHER=$legacy_launcher
+    elif ! same_path "$hidden_launcher" "$app" && [[ -d $hidden_launcher && ${(L)$(plist_get "$hidden_launcher" CFBundleIdentifier)} == ${(L)bundle_id}.launcher ]]; then
+      PROFILE_LAUNCHER=$hidden_launcher
+    fi
+  fi
   [[ -n $data_dir ]] && PROFILE_DATA_DIR=$(abs_path "$data_dir")
   if [[ -n $config_dir ]]; then
     PROFILE_CONFIG_DIR=$(abs_path "$config_dir")
@@ -3175,17 +3424,22 @@ agent_loaded() {
 
 legacy_agents_collect() {
   LA_PLIST=() LA_LABEL=() LA_LOADED=() LA_PROGRAM=()
+  local only_app=${1:-}
   local plist label program hay s needle matched
   local SLUG ${PROFILE_KEYS[@]}
   local -a PROFILE_DIRS reply needles
   needles=( "$SOURCE_APP" )
-  all_slugs
-  for s in $reply; do
-    profile_load "$s"
-    if (( PROFILE_DESKTOP )); then
-      needles+=( "$PROFILE_APP" )
-    fi
-  done
+  if [[ -n $only_app ]]; then
+    needles+=( "$only_app" )
+  else
+    all_slugs
+    for s in $reply; do
+      profile_load "$s"
+      if (( PROFILE_DESKTOP )); then
+        needles+=( "$PROFILE_APP" )
+      fi
+    done
+  fi
   for plist in "$AGENTS_DIR"/*.plist(N); do
     label=$(plutil -extract Label raw -o - "$plist" 2>/dev/null || true)
     [[ -n $label ]] || label=${plist:t:r}
@@ -3389,6 +3643,7 @@ main() {
     show) cmd_show "$@" ;;
     build) cmd_build "$@" ;;
     launcher) cmd_launcher "$@" ;;
+    migrate-layout) cmd_migrate_layout "$@" ;;
     resign) cmd_resign "$@" ;;
     set) cmd_set "$@" ;;
     recolor) cmd_recolor "$@" ;;

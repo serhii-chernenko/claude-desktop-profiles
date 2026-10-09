@@ -12,7 +12,7 @@ All commands are zsh. Replace the placeholders in the variables block once, then
 
 1. **`claude-profiles setup`** (signing identity import, trust prompt, key partition list, `launchctl bootstrap`). It needs the login password and cannot run in a sandboxed or auto-mode agent. Never run it for the user and never run its individual `security` or `launchctl` steps by hand. Ask the user to open Terminal and run `<repo>/bin/claude-profiles setup`.
 2. **The Keychain prompt** for "Claude Safe Storage" on the first launch of a new copy: the user must click **Always Allow**. Likewise macOS privacy prompts (microphone, screen recording, accessibility).
-3. **Pinning the launcher to the Dock** (drag `/Applications/Claude <Name> Launcher.app` onto the Dock, or right-click its icon, Options, Keep in Dock).
+3. **Pinning the launcher to the Dock** (drag `/Applications/Claude <Name>.app`, the launcher, onto the Dock, or right-click its icon, Options, Keep in Dock). The app copy itself is in the hidden folder `/Applications/.claude-profiles` and is never pinned. After `migrate-layout`, the old Dock item is dead: ask the user to remove it and pin the new one.
 4. **Signing in** to the new account inside the new copy.
 
 **Ask the user before doing any of these:**
@@ -35,6 +35,7 @@ These all accept `--yes` and the read-only ones accept `--plain`. Run `bin/claud
 | Register a hand-made copy | `scan --plain` prints `candidate` rows (app, launcher, bundle ID, data dir, config dir, name, signing identity or `-`); pass them to `adopt --slug s --name N --app PATH [--launcher PATH] [--data-dir P] [--config-dir P] [--identity NAME]` (the identity is detected from the copy when omitted) |
 | Shell hook in `~/.zshrc` | `shell-init status --plain`, then `shell-init install` or `shell-init uninstall` (an idempotent marked block; ask first, because it edits a shell startup file) |
 | Old hand-made LaunchAgents | `legacy-agents --plain` to list, `legacy-agents disable LABEL --yes` to unload and rename one (ask first) |
+| Move an old-layout profile to the new layout | `show <slug> --plain` prints `layout` `legacy` or `hidden`. For `legacy`: quit the copy (ask first), `migrate-layout <slug> --yes`. It exits 3 and prints `agent` rows when an old LaunchAgent would recreate the copy; ask the user, then `legacy-agents disable LABEL --yes` and retry. `build` does the same move on its own. Only the user can re-pin the launcher in the Dock afterwards |
 | CLI on the PATH | `install-cli` copies the tool to `~/.local/share/claude-profiles` and links `~/.local/bin/claude-profiles` |
 
 `setup` is never in this list: it is always run by the human in Terminal, because it needs their login password. The native app does the same: its **Set Up** button opens Terminal for the user and never handles the password.
@@ -45,8 +46,9 @@ These all accept `--yes` and the read-only ones accept `--plain`. Run `bin/claud
 NAME="<Name>"
 SLUG="<slug>"
 SRC="/Applications/Claude.app"
-APP="/Applications/Claude $NAME.app"
-LAUNCHER="/Applications/Claude $NAME Launcher.app"
+APPS_DIR="/Applications/.claude-profiles"
+APP="$APPS_DIR/Claude $NAME.app"
+LAUNCHER="/Applications/Claude $NAME.app"
 BUNDLE_ID="com.anthropic.claudefordesktop.$SLUG"
 LAUNCHER_ID="$BUNDLE_ID.launcher"
 DATA_DIR="$HOME/Library/Application Support/Claude-${NAME// /-}"
@@ -61,6 +63,7 @@ echo "work dir: $WORK"
 
 - `<Name>` is the display name, for example `Work`. `<slug>` is lowercase `[a-z0-9-]+`, for example `work`.
 - `<rrggbb>` is the exact color the icon's body should get, for example `3a7bd5`.
+- `APPS_DIR` is the `APPS_DIR` key of `~/.config/claude-profiles/config.env` when set. The copy goes there (Spotlight and Finder skip the dot-folder); the launcher goes to `/Applications` and is named exactly like the copy, so search shows one entry. `$LAUNCHER` must never equal `$APP`.
 - To reuse an existing data or config folder, set `DATA_DIR` or `CONFIG_DIR` to it instead (candidates are listed in step 7).
 
 ## 1. Preflight
@@ -197,6 +200,7 @@ This takes about a minute. A few `WARN: could not sign` lines are usually harmle
 Confirm again that the copy is not running, then:
 
 ```zsh
+mkdir -p "$APPS_DIR"
 if pgrep -f "^$APP/Contents/MacOS/" >/dev/null; then
   echo "STOP: copy is running"
 else
@@ -233,7 +237,8 @@ else
 end if
 EOF
 
-rm -rf "$LAUNCHER"
+[[ $LAUNCHER != "$APP" ]] || echo "STOP: the launcher path equals the copy; fix the variables before going on"
+[[ $LAUNCHER != "$APP" ]] && rm -rf "$LAUNCHER"
 osacompile -o "$LAUNCHER" "$WORK/launcher.applescript"
 REPO="<path-of-this-repository>"
 cp "$REPO/lib/urlhandler.js" "$LAUNCHER/Contents/Resources/urlhandler.js"
@@ -274,7 +279,7 @@ killall Dock
 
 The restore step runs 10 seconds after a fresh launch and does nothing while a `link <slug>` window for this profile is open (`state/link-at` names the slug and is younger than `LINK_TTL`, 900 seconds by default) or when the handler is not this copy any more. Without it, launching the copy makes it the `claude://` handler and regular Claude stops receiving links.
 
-The launcher is the thing to start and to pin. Opening `$APP` directly runs it on the main data folder.
+The launcher is the thing to start and to pin. Opening `$APP` directly runs it on the main data folder. `osacompile` resolves `application id "$BUNDLE_ID"`, so the copy must be registered with `lsregister -f` (step 5) before this step. The launcher's `open -b` finds the copy through that registration, not through its path.
 
 ## 7. CLI profile (config dir)
 
@@ -365,6 +370,8 @@ $PB -c "Print :LSEnvironment:CLAUDE_CONFIG_DIR" "$APP/Contents/Info.plist"
 $PB -c "Print :CFBundleExecutable" "$APP/Contents/Info.plist"
 codesign -dvv "$APP" 2>&1 | grep -E "Authority|Signature|Identifier"
 [[ -d $LAUNCHER ]] && echo "OK launcher present"
+[[ $LAUNCHER != "$APP" ]] && echo "OK launcher is not the copy"
+mdfind "kMDItemCFBundleIdentifier == \"$BUNDLE_ID\"" | grep -qF "$APP" && echo "WARN the copy is indexed by Spotlight" || echo "OK the copy is hidden from Spotlight"
 ```
 
 `Signature=adhoc` means no stable identity: acceptable, but the user will see Keychain prompts after every rebuild until they run `setup`.
@@ -383,6 +390,24 @@ launchctl print "gui/$(id -u)/io.github.claude-desktop-profiles.rebuild" >/dev/n
 ```
 
 A `FAIL` line means the copy was started without the launcher: quit it and open the launcher. Both `open files` counts should be `0`. The System Events line should show a non-zero PID; a PID of 0 means the executable was wrapped (step 2 was violated).
+
+## 8b. Move an old layout to the new one
+
+Older versions kept the copy at `/Applications/Claude <Name>.app` next to `/Applications/Claude <Name> Launcher.app`, so search showed two entries. `claude-profiles migrate-layout <slug>` does this move; by hand, with the copy quit and no old LaunchAgent (`legacy-agents`) referencing it:
+
+```zsh
+OLD_APP="/Applications/Claude $NAME.app"
+OLD_LAUNCHER="/Applications/Claude $NAME Launcher.app"
+codesign --verify --deep --strict "$OLD_APP" && echo "signature ok before"
+mkdir -p "$APPS_DIR"
+mv "$OLD_APP" "$APP" || { ditto "$OLD_APP" "$APP" && rm -rf "$OLD_APP"; }
+codesign --verify --deep --strict "$APP" && echo "signature ok after"
+"$LSREG" -f "$APP"
+"$LSREG" -u "$OLD_APP"
+"$LSREG" -u "$OLD_LAUNCHER"; rm -rf "$OLD_LAUNCHER"
+```
+
+Then repeat step 6 (the launcher is built at `/Applications/Claude $NAME.app`, the path the copy just left), update `PROFILE_APP` and `PROFILE_LAUNCHER` in `~/.config/claude-profiles/profiles/<slug>.env`, and restart the Dock. Do not rebuild or re-sign the copy: moving keeps its signature and designated requirement, so Keychain and privacy permissions are unaffected. Tell the user to re-pin the launcher.
 
 ## 9. After Claude updates
 

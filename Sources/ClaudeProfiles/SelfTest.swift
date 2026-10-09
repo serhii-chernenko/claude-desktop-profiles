@@ -107,6 +107,10 @@ enum SelfTest {
         let show = PlainParser.profileDetails("slug\twork\ncli\t1\napp\t-\ndir\t/h/dev\ndir\t/h/other\nnew_key\tvalue\textra")
         expect(show.value("slug") == "work" && show.flag("cli") == true && show.value("app") == nil, "show parser reads fields")
         expect(show.dirs == ["/h/dev", "/h/other"], "show parser collects dir rows")
+        let layout = PlainParser.profileDetails("slug\twork\nlayout\tlegacy\nlauncher\t/A/Claude Work Launcher.app")
+        expect(layout.usesLegacyLayout && PlainParser.profileDetails("layout\thidden").usesLegacyLayout == false && PlainParser.profileDetails("layout\t-").value("layout") == nil, "show parser reads the layout row")
+        let blockers = PlainParser.legacyAgents("agent\tcom.example.rebuild\t/h/Library/LaunchAgents/com.example.rebuild.plist\t0\t/bin/zsh /h/x.sh")
+        expect(blockers.count == 1 && blockers[0].label == "com.example.rebuild", "migrate-layout blocker rows use the legacy-agents format")
         let human = PlainParser.profileDetails("slug        work\ncolor       #3a7bd5 (hue shift 10, saturation x1)\napp         /A/Claude Work.app (built, 1.0)\ndirs        /a, /b")
         expect(human.value("color") == "#3a7bd5" && human.value("app") == "/A/Claude Work.app" && human.dirs == ["/a", "/b"], "show parser falls back to the human format")
 
@@ -136,7 +140,7 @@ enum SelfTest {
         let altConfig = home + "/.claude-alt"
         let project = home + "/dev/project"
         let encoded = altConfig + "/projects/-dev-project"
-        for directory in [home, settings, encoded, project, root + "/apps", root + "/agents"] {
+        for directory in [home, settings, encoded, project, root + "/apps", root + "/launchers", root + "/agents"] {
             try fileManager.createDirectory(atPath: directory, withIntermediateDirectories: true)
         }
         let sourceApp = ProcessInfo.processInfo.environment["CLAUDE_PROFILES_SELFTEST_SOURCE_APP"] ?? root + "/missing/Claude.app"
@@ -151,6 +155,7 @@ enum SelfTest {
             "CLAUDE_PROFILES_NO_URL_SET": "1",
             "CLAUDE_PROFILES_AGENTS_DIR": root + "/agents",
             "CLAUDE_PROFILES_APPS_DIR": root + "/apps",
+            "CLAUDE_PROFILES_LAUNCHER_DIR": root + "/launchers",
             "SIGN_IDENTITY": "-",
             "SHELL": "/bin/zsh",
         ])
@@ -198,10 +203,14 @@ enum SelfTest {
         if show.succeeded {
             let details = PlainParser.profileDetails(show.stdout)
             expect(details.value("slug") == "self-test" && details.flag("cli") == true && details.value("app") == nil, "show --plain fields")
+            expect(details.value("layout") == nil && !details.usesLegacyLayout, "show --plain has no layout for a CLI-only profile")
             expect(details.dirs == [project], "show --plain dir rows")
         } else {
             expect(false, "show exited \(show.status): \(show.failureSummary)")
         }
+
+        let migrate = call(runner, ["migrate-layout", "self-test", "--yes"])
+        expect(migrate.status == 1 && migrate.stderr.contains("no desktop app"), "migrate-layout refuses a CLI-only profile")
 
         let projectsBefore = call(runner, ["projects", "self-test", "list", "--plain"])
         if optionalCommand("projects list", projectsBefore) {

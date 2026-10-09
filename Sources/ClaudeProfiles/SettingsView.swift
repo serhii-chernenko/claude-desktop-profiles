@@ -1,12 +1,31 @@
 import SwiftUI
 
 struct SettingsView: View {
+    static let legacyAgentsAnchor = "legacy-agents"
+
     @EnvironmentObject var model: AppModel
     @State private var agentToDisable: LegacyAgent?
 
     private var status: StatusSummary? { model.status }
 
     var body: some View {
+        ScrollViewReader { proxy in
+            form
+                .onAppear { scrollToRequestedSection(proxy) }
+                .onChange(of: model.settingsScrollTarget) { _ in scrollToRequestedSection(proxy) }
+        }
+    }
+
+    private func scrollToRequestedSection(_ proxy: ScrollViewProxy) {
+        guard let target = model.settingsScrollTarget else { return }
+        Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 150_000_000)
+            withAnimation { proxy.scrollTo(target, anchor: .top) }
+            model.settingsScrollTarget = nil
+        }
+    }
+
+    private var form: some View {
         Form {
             if !model.statusAvailable {
                 Section {
@@ -141,6 +160,7 @@ struct SettingsView: View {
 
     private var legacySection: some View {
         Section {
+            Color.clear.frame(height: 0).id(Self.legacyAgentsAnchor)
             if model.legacyAgents.isEmpty {
                 Text("None found.")
                     .font(.callout)

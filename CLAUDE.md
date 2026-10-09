@@ -10,6 +10,7 @@ Utility to run several Claude accounts on macOS (desktop copies with their own d
    - `adopt` registers a hand-made copy that `scan --plain` reports as a `candidate`;
    - `shell-init install` adds the shell hook to `~/.zshrc` (ask first);
    - `legacy-agents` lists old LaunchAgents that watch Claude.app.
+   - `migrate-layout <slug> --yes` moves a profile whose `show --plain` says `layout legacy` into the new layout (copy hidden in `/Applications/.claude-profiles`, launcher `/Applications/Claude <Name>.app`); ask first, it needs the copy quit, and the user must re-pin the launcher afterwards.
 3. If the CLI fails or is missing, follow [docs/for-claude.md](docs/for-claude.md) step by step.
 4. Finish by listing the steps only the human can do: pin the launcher to the Dock, sign in, click **Always Allow** on the Keychain prompt, and run `setup` in Terminal.
 

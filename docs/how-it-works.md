@@ -4,11 +4,11 @@ This page explains the mechanics behind `claude-profiles`, including the approac
 
 ## Overview
 
-A **desktop profile** is a full copy of `/Applications/Claude.app` with a different bundle ID, a tinted icon and its own data folder. A tiny **launcher app** starts the copy with the right switches. A **CLI profile** is a separate `CLAUDE_CONFIG_DIR`. Both halves are independent: a profile may have either or both.
+A **desktop profile** is a full copy of `/Applications/Claude.app` with a different bundle ID, a tinted icon and its own data folder. A tiny **launcher app** starts the copy with the right switches. The copy lives in the hidden `APPS_DIR` (default `/Applications/.claude-profiles`) and the launcher in `/Applications`, so search shows one entry per profile (fact 12). A **CLI profile** is a separate `CLAUDE_CONFIG_DIR`. Both halves are independent: a profile may have either or both.
 
 ```
 ~/.config/claude-profiles/
-  config.env              global settings (sourced by zsh); SOURCE_TEAM_ID (default Q6L2SF6YDW, empty disables) is the Apple Team ID Claude.app must be signed by before it is copied
+  config.env              global settings (sourced by zsh); SOURCE_TEAM_ID (default Q6L2SF6YDW, empty disables) is the Apple Team ID Claude.app must be signed by before it is copied; APPS_DIR (default /Applications/.claude-profiles) is where app copies are built
   profiles/<slug>.env     one file per profile
   rules.tsv               derived: prefix<TAB>slug<TAB>config_dir (read by the shell hook)
   state/                  lock dir, staging, notification markers
@@ -23,7 +23,7 @@ A profile file holds `PROFILE_NAME`, `PROFILE_COLOR`, `PROFILE_SIGN_IDENTITY`, `
 - `PROFILE_SIGN_IDENTITY` is empty by default (resolved automatically, see fact 6). `adopt` fills it from the copy's current signature, `set <slug> sign-identity NAME` changes it.
 - `scan --plain` leaves out project folders without a `.jsonl` transcript and config dirs that have no `projects/`, `.claude.json` or `settings.json` (the main one is always listed).
 
-Environment variables: `CLAUDE_PROFILES_HOME` (settings folder), `CLAUDE_PROFILES_LOG` (log file), `CLAUDE_PROFILES_NO_URL_SET` (never change the `claude://` handler; for tests) and, in the shell hook, `CLAUDE_PROFILES_MODE` (`auto`, `warn` or `off`, overrides `CLI_RULE_MODE`). `lib/json.js` copies a `.claude.json` to `<file>.claude-profiles.bak` before it rewrites it.
+Environment variables: `CLAUDE_PROFILES_HOME` (settings folder), `CLAUDE_PROFILES_LOG` (log file), `CLAUDE_PROFILES_APPS_DIR` (overrides `APPS_DIR`), `CLAUDE_PROFILES_LAUNCHER_DIR` (launcher folder, default `/Applications`), `CLAUDE_PROFILES_AGENTS_DIR` (folder scanned for old LaunchAgents), `CLAUDE_PROFILES_NO_URL_SET` (never change the `claude://` handler; for tests) and, in the shell hook, `CLAUDE_PROFILES_MODE` (`auto`, `warn` or `off`, overrides `CLI_RULE_MODE`). `lib/json.js` copies a `.claude.json` to `<file>.claude-profiles.bak` before it rewrites it.
 
 ## Facts that shape the design
 
@@ -104,25 +104,47 @@ Everything inside a downloaded app carries the `com.apple.quarantine` attribute,
 
 `install-cli` is the way out. It copies `bin/`, `lib/` and `VERSION` out of the app with `ditto --noqtn` (no quarantine flag) into `~/.local/share/claude-profiles`, applies `chmod -R go-w`, swaps the new copy into place and links `~/.local/bin/claude-profiles` to it. The copy is a stable, user-owned location that has never been quarantined, which is exactly what the LaunchAgent and the Terminal need. The app starts the CLI as `/bin/zsh -f <script>`, so it never depends on the script's executable bit or on the quarantine state. Everyday commands run from the copy inside the app; the **Set Up** button first runs `install-cli` and then opens Terminal on the installed copy. After installing a new version of the app, press **Update** in Settings (or run `install-cli`) so the installed copy matches.
 
+### 12. Two apps, one search entry
+
+Spotlight and Raycast list every app they index, so a copy next to its launcher showed two nearly identical entries, and the wrong one (the copy) starts on the main data folder (fact 5). The layout therefore splits them by folder:
+
+- The copy is `$APPS_DIR/Claude <Name>.app`. `APPS_DIR` defaults to `/Applications/.claude-profiles`: Spotlight does not index dot-folders and Finder hides them. The copy keeps `CFBundleName` and `CFBundleDisplayName` `Claude <Name>`, so the Dock and ⌘-Tab show the same name as the launcher. It is always registered with `lsregister -f` at its real path.
+- The launcher is `/Applications/Claude <Name>.app`, named exactly like the profile, with bundle ID `<copy bundle ID>.launcher`.
+- The launcher's `open -n -b <bundle id>` and the `application id` lookups in its applet resolve the copy through Launch Services, not through its path. That is why `osacompile` of the launcher needs the copy registered first, and why a stale registration of an old path must be removed (`lsregister -u`): two registered apps with one bundle ID make `open -b` ambiguous.
+- A profile is in the **old layout** (`show --plain` prints `layout legacy`) when its copy is not in `APPS_DIR`. The tool only migrates automatically when the launcher is also named `<copy> Launcher.app` next to the copy; other hand-made arrangements are migrated only by an explicit `migrate-layout`.
+
+`migrate-layout <slug>` (and `build`, before it rebuilds a profile in the old layout) does, in this order:
+
+1. refuses while the copy is running, and while a legacy LaunchAgent (the `legacy-agents` detection: its program or watch paths contain the copy's path or the source app's) is present. Such an agent would rebuild the copy at the old path, which is now the launcher's path. The command exits 3 and prints the agent rows with `--plain`; inside `build` the block is only a warning and the build proceeds in the old layout, so Claude updates keep being applied;
+2. resolves the signing identity (`choose_sign_id`) so a failure aborts before anything moved;
+3. `mkdir -p APPS_DIR`, then `mv` the copy into it (`ditto` and remove the original if `mv` fails). It is a rename on one volume: the inode, signature and designated requirement are unchanged, so Keychain and TCC grants survive;
+4. `codesign --verify --deep --strict` at the new path. If it passed before the move and fails after, the copy is moved back and the command stops;
+5. `lsregister -f` the new path, `lsregister -u` the old one;
+6. removes the old launcher (only when its bundle ID is `<copy bundle ID>.launcher`; anything else is left alone with a warning);
+7. updates `PROFILE_APP` and `PROFILE_LAUNCHER`, refreshes `rules.tsv`, builds the new launcher at `/Applications/Claude <Name>.app` with the profile's resolved identity (never ad-hoc over an identity), and restarts the Dock unless run by `auto`.
+
+The old Dock item pointed at the removed launcher, so the user must re-pin it. `check` warns about the old layout and fails if the launcher path is the copy itself (building a launcher there would delete the copy; `build_launcher` and `remove` refuse that case too). `remove` also deletes `APPS_DIR` when it is left empty.
+
 ## App architecture
 
 The native app (`Sources/ClaudeProfiles`, SwiftUI, compiled by `scripts/build-app.sh` into a universal binary) is a thin shell over the CLI. It holds no profile logic of its own:
 
 - `CLIRunner` runs `bin/claude-profiles` (from `Contents/Resources/cli/`, or the path in `CLAUDE_PROFILES_CLI`) as a subprocess with `--yes`, streams the output to the log panel and returns the exit status and output.
 - `PlainParser` parses the `--plain` output of `list`, `scan`, `show`, `projects <slug> list`, `status`, `shell-init status` and `legacy-agents`. Unknown rows and extra columns are ignored, so a newer CLI keeps working. That output is the contract between the two halves.
-- The views (`SidebarView`, `ProfileDetailView`, `MainClaudeView`, `SettingsView` and the sheets) call `AppModel`, which calls the runner. Anything that needs the login password, such as `setup`, opens Terminal instead (fact 8); the app never sees the password.
+- The views (`SidebarView`, `ProfileDetailView`, `MainClaudeView`, `SettingsView` and the sheets) call `AppModel`, which calls the runner. **Move to new layout** appears on a profile whose `show --plain` reports `layout legacy`; it runs `migrate-layout <slug> --yes --plain`, and when the CLI exits 3 the `agent` rows on stdout (the `legacy-agents --plain` format) are shown with a button that opens Settings at the old LaunchAgents. Anything that needs the login password, such as `setup`, opens Terminal instead (fact 8); the app never sees the password.
 - `ClaudeProfiles --self-test` runs the parser checks, then the CLI against a temporary `HOME` and `CLAUDE_PROFILES_HOME`: it creates a CLI-only profile, edits folders, recolors, copies a project, installs the CLI and removes the profile. It needs neither Claude.app nor a window. `scripts/build-app.sh` runs it on every build, so CI covers it on a runner without Claude.
 - `scripts/build-app.sh` copies `bin/`, `lib/` and the version into `Contents/Resources/cli/` with `ditto --noqtn` and signs the bundle ad-hoc (or with `SIGNING_IDENTITY`). `scripts/build-dmg.sh` stages the app with `cp -RX` and `xattr -cr`, verifies the signature in the stage, adds the Applications link, "READ ME FIRST.txt" and the README, and writes `SHA256SUMS.txt`.
 
 ## Build pipeline
 
 1. Take a lock (`mkdir` of a lock dir; stale after 30 minutes) so the LaunchAgent and a manual build never overlap.
-2. `ditto` the source app into a staging folder on the same volume as the destination.
-3. Edit `Info.plist`: `CFBundleIdentifier`, `CFBundleDisplayName`, `LSEnvironment:CLAUDE_CONFIG_DIR`, delete `CFBundleIconName`.
-4. Tint the icon.
-5. Re-sign **inside-out**: every nested `.app`, `.framework`, `.xpc`, `.appex` and every Mach-O file, deepest paths first, then the main executable (with `--identifier <bundle-id>`), then the bundle. Each item keeps its own entitlements, minus the ones an ad-hoc or self-signed signature cannot carry (`com.apple.developer.*`, `com.apple.application-identifier`, `keychain-access-groups`, team identifiers), which would make macOS kill the process at launch. Entitlements such as the virtualization one stay.
-6. Verify the signature, re-check that the copy is not running, then swap the staged bundle into place (the old copy is kept until the move succeeded).
-7. Build the launcher with `osacompile`, copy `lib/urlhandler.js` into its `Contents/Resources`, give it the copy's icon and register both with `lsregister -f`; `killall Dock` when run interactively.
+2. If the profile is in the old layout, run the layout migration (fact 12) first.
+3. `ditto` the source app into a staging folder on the same volume as the destination (`APPS_DIR` is created when missing).
+4. Edit `Info.plist`: `CFBundleIdentifier`, `CFBundleDisplayName`, `LSEnvironment:CLAUDE_CONFIG_DIR`, delete `CFBundleIconName`.
+5. Tint the icon.
+6. Re-sign **inside-out**: every nested `.app`, `.framework`, `.xpc`, `.appex` and every Mach-O file, deepest paths first, then the main executable (with `--identifier <bundle-id>`), then the bundle. Each item keeps its own entitlements, minus the ones an ad-hoc or self-signed signature cannot carry (`com.apple.developer.*`, `com.apple.application-identifier`, `keychain-access-groups`, team identifiers), which would make macOS kill the process at launch. Entitlements such as the virtualization one stay.
+7. Verify the signature, re-check that the copy is not running, then swap the staged bundle into place (the old copy is kept until the move succeeded).
+8. Build the launcher at `/Applications/Claude <Name>.app` with `osacompile`, copy `lib/urlhandler.js` into its `Contents/Resources`, give it the copy's icon and register both with `lsregister -f`; `killall Dock` when run interactively.
 
 `recolor` is the fast path: it re-tints the `.icns` from the **source** app's icon (never from the already tinted one), re-signs only the outer bundle with the profile's resolved identity, rebuilds the launcher, refreshes Launch Services and restarts the Dock. It works while the copy is running; the Dock updates after the copy restarts.
 
@@ -132,7 +154,7 @@ The native app (`Sources/ClaudeProfiles`, SwiftUI, compiled by `scripts/build-ap
 
 1. fixes bare launches;
 2. restores `claude://` to regular Claude once the link window expired (also the backstop for copies started without the launcher, see fact 10);
-3. decides whether the copy is stale: missing, wrong bundle ID (the copy's own updater can overwrite it), version differs from the source, launcher missing, `LSEnvironment` missing, or not signed by the profile's resolved identity (including a mixed signature);
+3. decides whether the copy is stale: missing, wrong bundle ID (the copy's own updater can overwrite it), version differs from the source, launcher missing (at `PROFILE_LAUNCHER`, whichever layout), `LSEnvironment` missing, or not signed by the profile's resolved identity (including a mixed signature);
 4. skips the source if its own signature is invalid (an update in progress);
 5. if the copy is running, notifies once per version and waits; otherwise rebuilds.
 
