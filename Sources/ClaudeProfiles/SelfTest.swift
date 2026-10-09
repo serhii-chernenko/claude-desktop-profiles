@@ -152,7 +152,23 @@ enum SelfTest {
         expect(PlainParser.slugify("  My Work Profile! ") == "my-work-profile", "slugify matches the CLI")
         expect(PlainParser.isValidName("Work") && !PlainParser.isValidName(" Work") && !PlainParser.isValidName("a/b"), "name validation")
         expect(Color(hex: "#3a7bd5")?.hexString == "#3a7bd5", "hex color round trip")
+        ownerChecks()
         homeChecks()
+    }
+
+    private static func ownerChecks() {
+        let main = Profile(slug: "default", name: "Claude", color: nil, isDesktop: true, app: "/A/Claude.app", configDir: "/h/.claude", dataDir: "/h/data")
+        let work = Profile(slug: "work", name: "Work", color: nil, isDesktop: true, app: "/A/Claude Work.app", configDir: "/h/.claude-work", dataDir: "/h/data-work")
+        let cliOnly = Profile(slug: "ci", name: "Ci", color: nil, isDesktop: false, app: nil, configDir: "/h/.claude-ci", dataDir: nil)
+        let all = [main, work, cliOnly]
+        expect(StorageOwners.configOwner(of: "/h/.claude", in: all) == "Main Claude", "config owner of the main folder is Main Claude")
+        expect(StorageOwners.configOwner(of: "/h/.claude-work/", in: all) == "Work", "config owner ignores a trailing slash")
+        expect(StorageOwners.configOwner(of: "/h/.claude-other", in: all) == nil && StorageOwners.configOwner(of: "", in: all) == nil, "config owner is nil for unknown or empty paths")
+        expect(StorageOwners.dataOwner(of: "/h/data", in: all) == "Main Claude" && StorageOwners.dataOwner(of: "/h/data-work", in: all) == "Work", "data owner resolves the main and profile data folders")
+        expect(StorageOwners.dataOwner(of: "/h/nope", in: all) == nil && StorageOwners.dataOwner(of: "", in: [cliOnly]) == nil, "data owner is nil without a match")
+        expect(StorageOwners.configSharingWarning(path: "/h/.claude-work", in: all) == "Already used by Work: both profiles will share Claude Code history, settings and sign-in.", "config sharing warning text")
+        expect(StorageOwners.dataSharingWarning(path: "/h/data", in: all) == "Already used by Main Claude: both profiles will share the desktop sign-in and chats.", "data sharing warning text")
+        expect(StorageOwners.includedProjectsNote(folder: "~/.x", count: 3) == "3 projects in ~/.x are already part of this profile." && StorageOwners.includedProjectsNote(folder: "~/.x", count: 1) == "1 project in ~/.x is already part of this profile.", "included projects note pluralizes")
     }
 
     private static func homeChecks() {

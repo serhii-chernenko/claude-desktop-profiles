@@ -219,6 +219,7 @@ struct InlineLog: View {
 }
 
 struct ProjectChecklist: View {
+    @EnvironmentObject var model: AppModel
     let projects: [ScannedProject]
     @Binding var selected: Set<String>
     @State private var query = ""
@@ -276,10 +277,18 @@ struct ProjectChecklist: View {
     }
 
     private func subtitle(_ project: ScannedProject) -> String {
-        var parts = ["in \(tildePath(project.configDir))", "\(project.sessions) session\(project.sessions == 1 ? "" : "s")"]
+        var parts = [origin(of: project), "\(project.sessions) session\(project.sessions == 1 ? "" : "s")"]
         if let lastUsed = project.lastUsed { parts.append("last used \(relativeDate(lastUsed))") }
         if let owner = project.owner { parts.append("folder rule: \(owner)") }
         return parts.joined(separator: " · ")
+    }
+
+    private func origin(of project: ScannedProject) -> String {
+        let folder = tildePath(project.configDir)
+        guard let owner = StorageOwners.configOwner(of: project.configDir, in: model.allProfiles) else {
+            return "from \(folder)"
+        }
+        return "from \(folder) (\(owner))"
     }
 
     private func binding(for cwd: String) -> Binding<Bool> {

@@ -151,6 +151,10 @@ final class AppModel: ObservableObject {
         case agents(CommandResult)
     }
 
+    var allProfiles: [Profile] {
+        (defaultProfile.map { [$0] } ?? []) + profiles
+    }
+
     private func apply(_ piece: RefreshPiece) {
         switch piece {
         case .list(let result):

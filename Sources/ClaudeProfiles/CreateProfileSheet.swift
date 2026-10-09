@@ -28,6 +28,19 @@ struct CreateProfileSheet: View {
         model.scan.projects.filter { configDir.isEmpty || $0.configDir != configDir }
     }
 
+    private var pickedConfig: ConfigDirEntry? {
+        model.scan.configs.first { $0.path == configDir }
+    }
+
+    private var configSharingWarning: String? {
+        StorageOwners.configSharingWarning(path: configDir, in: model.allProfiles)
+    }
+
+    private var dataSharingWarning: String? {
+        guard desktop else { return nil }
+        return StorageOwners.dataSharingWarning(path: dataDir, in: model.allProfiles)
+    }
+
     var body: some View {
         CommandSheet(title: "New Profile",
                      subtitle: "A profile is a separate Claude account: its own desktop app copy, its own Claude Code history, or both.",
@@ -35,9 +48,7 @@ struct CreateProfileSheet: View {
             identitySection
             usageSection
             storageSection
-            if !availableProjects.isEmpty {
-                projectsSection
-            }
+            projectsSection
             if cli {
                 foldersSection
             }
@@ -160,6 +171,11 @@ struct CreateProfileSheet: View {
                     Text("Picking an existing folder reuses the sign-in and chats stored in it.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
+                    if let warning = dataSharingWarning {
+                        Text(warning)
+                            .font(.caption)
+                            .foregroundStyle(.orange)
+                    }
                 }
             }
             VStack(alignment: .leading, spacing: 3) {
@@ -172,6 +188,11 @@ struct CreateProfileSheet: View {
                 Text(configFolderCaption)
                     .font(.caption)
                     .foregroundStyle(.secondary)
+                if let warning = configSharingWarning {
+                    Text(warning)
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                }
             }
         } header: {
             Text("Storage")
@@ -180,21 +201,34 @@ struct CreateProfileSheet: View {
 
     private var projectsSection: some View {
         Section {
-            ProjectChecklist(projects: availableProjects, selected: $selectedProjects)
-            VStack(alignment: .leading, spacing: 4) {
-                Picker("How", selection: $linkMode) {
-                    ForEach(LinkMode.allCases) { mode in
-                        Text(mode.title).tag(mode)
-                    }
-                }
-                .pickerStyle(.segmented)
-                Text(linkMode.explanation)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+            Text("Copy, move or share Claude Code history that currently lives in another profile's folder.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            if let config = pickedConfig {
+                Label(StorageOwners.includedProjectsNote(folder: tildePath(config.path), count: config.projectCount),
+                      systemImage: "checkmark.circle")
+                    .font(.callout)
             }
-            .disabled(selectedProjects.isEmpty)
+            if availableProjects.isEmpty {
+                Text("No projects in other folders.")
+                    .foregroundStyle(.secondary)
+            } else {
+                ProjectChecklist(projects: availableProjects, selected: $selectedProjects)
+                VStack(alignment: .leading, spacing: 4) {
+                    Picker("How", selection: $linkMode) {
+                        ForEach(LinkMode.allCases) { mode in
+                            Text(mode.title).tag(mode)
+                        }
+                    }
+                    .pickerStyle(.segmented)
+                    Text(linkMode.explanation)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                .disabled(selectedProjects.isEmpty)
+            }
         } header: {
-            Text("Bring existing projects (optional)")
+            Text("Bring projects from other folders (optional)")
         } footer: {
             Text("Selected project folders also become folders that pick this profile automatically.")
                 .font(.caption)
