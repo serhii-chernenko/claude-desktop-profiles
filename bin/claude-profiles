@@ -6,16 +6,17 @@
 #
 #   new [--name N] [--slug s] [--color '#hex'|--hue DEG|--pick-color] [--desktop|--no-desktop]
 #       [--cli|--no-cli] [--data-dir P] [--config-dir P] [--dir PATH]... [--link PROJECT_CWD]...
-#       [--link-mode symlink|move|copy] [--no-build] [--yes] [--plain]
+#       [--link-mode symlink|move|copy] [--mode self|launcher] [--no-build] [--yes] [--plain]
 #   list [--plain]                      profiles (slug name color desktop app config_dir data_dir)
 #   scan [--plain]                      config dirs, data dirs, projects and existing copies to adopt (read-only)
 #   show <slug> [--plain]               profile details (--plain: key<TAB>value lines, then one dir line per folder)
-#   build <slug>|--all                  (re)build the desktop copy and its launcher
-#   launcher <slug>                     rebuild only the launcher
-#   migrate-layout <slug> [--yes] [--plain]   move the app copy into the hidden apps dir; the launcher becomes "Claude <Name>"
-#   dock <slug> fix [--yes] [--dry-run] [--pin]   keep only the launcher pinned in the Dock: drop pins of the app copy,
-#                                       repoint a dead "... Launcher.app" pin; --pin adds the launcher when nothing is pinned
-#   resign <slug>                       re-sign only the outer bundle and the launcher with the resolved identity
+#   build <slug>|--all [--mode self|launcher]   (re)build the desktop app; self mode (the default) is one app per profile
+#   launcher <slug>                     rebuild only the launcher (launcher mode)
+#   migrate-layout <slug> [--yes] [--plain]   turn a launcher-mode profile into one self-mode app "Claude <Name>"
+#                                       in /Applications: the launcher and the hidden copy go away
+#   dock <slug> fix [--yes] [--dry-run] [--pin]   keep one Dock pin per profile (the app in self mode, else the launcher):
+#                                       drop or repoint pins of the hidden copy or an old launcher; --pin adds it when missing
+#   resign <slug>                       re-sign only the outer bundle (and the launcher) with the resolved identity
 #   set <slug> sign-identity NAME|--clear   pin the signing identity of one profile
 #   recolor <slug> [--color '#hex'|--hue DEG|--pick-color]
 #   check <slug>                        post-launch checks
@@ -32,7 +33,7 @@
 #                                       copy this CLI to ~/.local/share/claude-profiles and link ~/.local/bin
 #   legacy-agents [--plain]             other LaunchAgents that watch Claude.app or a profile copy
 #   legacy-agents disable LABEL [--yes] unload one of them and rename its plist to .disabled
-#   auto [--dry-run]                    what the LaunchAgent runs
+#   auto [--dry-run]                    what the LaunchAgent runs (keeps each profile's mode)
 #   uninstall-agent                     remove the LaunchAgent
 #   shell-init zsh|bash                 eval "$(claude-profiles shell-init zsh)"
 #   shell-init install [zsh|bash] [--rc FILE]    add the eval line to ~/.zshrc or ~/.bashrc (idempotent block)
@@ -43,11 +44,14 @@
 #
 # --yes never prompts. --plain prints tab-separated output without colors.
 # Exit codes: 0 ok, 1 error, 2 usage. Config: $CLAUDE_PROFILES_HOME (~/.config/claude-profiles).
-# Layout: the copy lives in APPS_DIR (config.env, default /Applications/.claude-profiles, hidden from search);
-# the launcher lives in /Applications and is named like the profile ("Claude <Name>").
+# Self mode (default): the app is /Applications/Claude <Name>.app, a copy of Claude whose app.asar carries a boot
+# file (cdp-boot.js) that selects the profile's data dir. It falls back to launcher mode when the Claude build
+# cannot be patched safely. Launcher mode: the copy lives in APPS_DIR (config.env, default /Applications/.claude-profiles)
+# and a launcher in /Applications named like the profile starts it with --user-data-dir.
 # Test overrides: CLAUDE_PROFILES_AGENTS_DIR (LaunchAgents dir), CLAUDE_PROFILES_APPS_DIR (overrides APPS_DIR),
-# CLAUDE_PROFILES_LAUNCHER_DIR (launcher dir, default /Applications), CLAUDE_PROFILES_DOCK_PLIST (a plist file that
-# `dock`, `show`, `check`, `migrate-layout` and `remove` read and write instead of the real Dock; the Dock is not restarted).
+# CLAUDE_PROFILES_LAUNCHER_DIR (app and launcher dir, default /Applications), CLAUDE_PROFILES_APP_MODE (self or launcher,
+# the mode `new` and `build` use), CLAUDE_PROFILES_DOCK_PLIST (a plist file that `dock`, `show`, `check`, `build`,
+# `migrate-layout` and `remove` read and write instead of the real Dock; the Dock is not restarted).
 #
 setopt extended_glob
 set -euo pipefail
@@ -86,13 +90,22 @@ RC_BEGIN='# >>> claude-profiles >>>'
 RC_END='# <<< claude-profiles <<<'
 MAIN_CONFIG_DIR=$HOME/.claude
 MAIN_DATA_DIR="$HOME/Library/Application Support/Claude"
+MAIN_LOGS_DIR="$HOME/Library/Logs/Claude"
 DEFAULT_IDENTITY="Claude Profiles Signing"
 DEFAULT_SOURCE_TEAM_ID=Q6L2SF6YDW
 DEFAULT_AGENT_LABEL=io.github.claude-desktop-profiles.rebuild
 DEFAULT_PALETTE=('#3a7bd5' '#2ecc71' '#9b59b6' '#e67e22' '#e84393' '#16a085' '#f1c40f' '#c0392b')
-PROFILE_KEYS=(PROFILE_NAME PROFILE_COLOR PROFILE_SIGN_IDENTITY PROFILE_DESKTOP PROFILE_CLI PROFILE_APP PROFILE_LAUNCHER PROFILE_BUNDLE_ID PROFILE_DATA_DIR PROFILE_CONFIG_DIR)
+PROFILE_KEYS=(PROFILE_NAME PROFILE_COLOR PROFILE_SIGN_IDENTITY PROFILE_DESKTOP PROFILE_CLI PROFILE_MODE PROFILE_APP PROFILE_LAUNCHER PROFILE_BUNDLE_ID PROFILE_DATA_DIR PROFILE_CONFIG_DIR)
 QUIT_WAIT_SECONDS=20
 LOCK_STALE_MINUTES=30
+ASAR_BOOT_FILE=cdp-boot.js
+ASAR_BOOT_VERSION=2
+ASAR_BLOCK_SIZE=4194304
+ASAR_ALGORITHM=SHA256
+ASAR_INTEGRITY_KEY=Resources/app.asar
+ASAR_FUSE_SENTINEL=dL7pKGdnNz796PbbjQWNKmHXBZaB9tsX
+ASAR_FUSE_WIRE_VERSION=1
+ASAR_FUSE_COUNT=9
 
 PLAIN=0
 YES=0
@@ -106,6 +119,9 @@ LOCK_HELD=0
 CLEANUP_PATHS=()
 TS_ARGS=()
 LAYOUT_BLOCKED=0
+BUILD_MODE=${CLAUDE_PROFILES_APP_MODE:-}
+KEEP_MODE=${CLAUDE_PROFILES_KEEP_MODE:-0}
+ASAR_REASON=""
 TMP=""
 
 C_RESET= C_BOLD= C_DIM= C_RED= C_GREEN= C_YELLOW= C_CYAN=
@@ -229,6 +245,7 @@ load_config() {
   [[ $LINK_TTL == <-> ]] || LINK_TTL=900
   valid_identity "$SIGN_IDENTITY" || die "SIGN_IDENTITY in $CONFIG_FILE must be - or use only letters, digits, space, dot, underscore and dash."
   [[ -z $SOURCE_TEAM_ID || $SOURCE_TEAM_ID =~ '^[A-Z0-9]{10}$' ]] || die "SOURCE_TEAM_ID in $CONFIG_FILE must be empty or a 10-character Team ID."
+  valid_mode_choice "$BUILD_MODE" || die "CLAUDE_PROFILES_APP_MODE must be self or launcher (got \"$BUILD_MODE\")."
   AGENT_PLIST=$AGENTS_DIR/$AGENT_LABEL.plist
 }
 
@@ -312,6 +329,10 @@ valid_name() {
 
 valid_identity() {
   [[ $1 == - || $1 =~ '^[A-Za-z0-9 ._-]+$' ]]
+}
+
+valid_mode_choice() {
+  [[ -z $1 || $1 == (self|launcher) ]]
 }
 
 normalize_hex() {
@@ -454,8 +475,13 @@ profile_fill_defaults() {
   : ${PROFILE_NAME:=$SLUG}
   : ${PROFILE_DESKTOP:=1}
   : ${PROFILE_CLI:=1}
+  [[ $PROFILE_MODE == self ]] || PROFILE_MODE=launcher
+  if is_self_mode; then
+    : ${PROFILE_APP:=$LAUNCHER_DIR/Claude $PROFILE_NAME.app}
+    PROFILE_LAUNCHER=
+  fi
   : ${PROFILE_APP:=$APPS_DIR/Claude $PROFILE_NAME.app}
-  if [[ -z $PROFILE_LAUNCHER ]]; then
+  if ! is_self_mode && [[ -z $PROFILE_LAUNCHER ]]; then
     if same_path "${PROFILE_APP:h}" "$LAUNCHER_DIR"; then
       PROFILE_LAUNCHER="${PROFILE_APP%.app} Launcher.app"
     else
@@ -510,8 +536,14 @@ launcher_id() {
   print -r -- "$PROFILE_BUNDLE_ID.launcher"
 }
 
+is_self_mode() {
+  [[ $PROFILE_MODE == self ]]
+}
+
 layout_of_profile() {
-  if same_path "${PROFILE_APP:h}" "$APPS_DIR" && ! same_path "$PROFILE_APP" "$PROFILE_LAUNCHER"; then
+  if is_self_mode; then
+    print -r -- self
+  elif same_path "${PROFILE_APP:h}" "$APPS_DIR" && ! same_path "$PROFILE_APP" "$PROFILE_LAUNCHER"; then
     print -r -- hidden
   else
     print -r -- legacy
@@ -810,20 +842,273 @@ copy_icns_path() {
   fi
 }
 
+sha256_of() {
+  local out
+  out=$(shasum -a 256 -- "$1") || return 1
+  print -r -- "${out%% *}"
+}
+
+file_size() {
+  /usr/bin/stat -f %z -- "$1"
+}
+
+asar_u32() {
+  local value
+  value=$(od -An -t u4 -j "$2" -N 4 -- "$1" 2>/dev/null) || return 1
+  value=${value//[[:space:]]/}
+  [[ $value == <-> ]] || return 1
+  print -r -- "$value"
+}
+
+asar_le32() {
+  local n=$1
+  printf "$(printf '\\x%02x\\x%02x\\x%02x\\x%02x' $(( n & 255 )) $(( (n >> 8) & 255 )) $(( (n >> 16) & 255 )) $(( (n >> 24) & 255 )))"
+}
+
+asar_read_header() {
+  local asar=$1 out=$2 first pickle payload len
+  ASAR_BASE=0
+  ASAR_SIZE=0
+  [[ -f $asar ]] || return 1
+  first=$(asar_u32 "$asar" 0) && pickle=$(asar_u32 "$asar" 4) && payload=$(asar_u32 "$asar" 8) && len=$(asar_u32 "$asar" 12) || return 1
+  (( first == 4 && payload == 4 + (len + 3) / 4 * 4 && pickle == payload + 4 )) || return 1
+  head -c $(( 16 + len )) -- "$asar" | tail -c "$len" > "$out"
+  [[ $(file_size "$out") == "$len" ]] || return 1
+  ASAR_BASE=$(( 8 + pickle ))
+  ASAR_SIZE=$(file_size "$asar")
+  (( ASAR_SIZE >= ASAR_BASE ))
+}
+
+asar_extract() {
+  local asar=$1 offset=$2 size=$3 out=$4 position lead block=4096 chunk=$TMP/asar-chunk
+  [[ $offset == <-> && $size == <-> ]] || return 1
+  position=$(( ASAR_BASE + offset ))
+  lead=$(( position % block ))
+  dd if="$asar" of="$chunk" bs=$block skip=$(( position / block )) count=$(( (lead + size + block - 1) / block )) 2>/dev/null || return 1
+  head -c $(( lead + size )) -- "$chunk" | tail -c "$size" > "$out"
+  [[ $(file_size "$out") == "$size" ]]
+}
+
+asar_entry() {
+  local line
+  ASAR_E_OFFSET= ASAR_E_SIZE= ASAR_E_ALG= ASAR_E_BLOCK= ASAR_E_HASH= ASAR_E_BLOCKS= ASAR_E_UNPACKED=
+  line=$(jxa asar.js entry "$1" "$2" 2>/dev/null) || return $?
+  IFS=$'\t' read -r ASAR_E_OFFSET ASAR_E_SIZE ASAR_E_ALG ASAR_E_BLOCK ASAR_E_HASH ASAR_E_BLOCKS ASAR_E_UNPACKED <<<"$line"
+}
+
+asar_entry_ok() {
+  local asar=$1 header=$2 entry=$3 out=$4 whole=${5:-}
+  asar_entry "$header" "$entry" || return 1
+  [[ $ASAR_E_ALG == $ASAR_ALGORITHM && $ASAR_E_BLOCK == $ASAR_BLOCK_SIZE && $ASAR_E_UNPACKED == 0 && $ASAR_E_SIZE == <-> ]] || return 1
+  if [[ -z $whole ]]; then
+    (( ASAR_E_SIZE <= ASAR_BLOCK_SIZE )) && [[ $ASAR_E_BLOCKS == $ASAR_E_HASH ]] || return 1
+  fi
+  asar_extract "$asar" "$ASAR_E_OFFSET" "$ASAR_E_SIZE" "$out" || return 1
+  [[ $(sha256_of "$out") == $ASAR_E_HASH ]]
+}
+
+asar_plist_hash() {
+  local plist=$1/Contents/Info.plist dump hash
+  local -a keys
+  dump=$($PB -c "Print :ElectronAsarIntegrity" "$plist" 2>/dev/null) || return 1
+  keys=( ${(f)"$(print -r -- "$dump" | awk '/^    [^ ].* = Dict \{$/ { sub(/^    /, ""); sub(/ = Dict \{$/, ""); print }')"} )
+  (( ${#keys} == 1 )) && [[ $keys[1] == $ASAR_INTEGRITY_KEY ]] || return 1
+  [[ $($PB -c "Print :ElectronAsarIntegrity:${ASAR_INTEGRITY_KEY}:algorithm" "$plist" 2>/dev/null) == $ASAR_ALGORITHM ]] || return 1
+  hash=$($PB -c "Print :ElectronAsarIntegrity:${ASAR_INTEGRITY_KEY}:hash" "$plist" 2>/dev/null) || return 1
+  [[ $hash =~ '^[0-9a-f]{64}$' ]] || return 1
+  print -r -- "$hash"
+}
+
+asar_fuse_wire() {
+  local framework="$1/Contents/Frameworks/Electron Framework.framework/Electron Framework" start version count wire
+  local -a hits
+  [[ -f $framework ]] || return 1
+  hits=( ${(f)"$(LC_ALL=C grep -a -b -o -F -- "$ASAR_FUSE_SENTINEL" "$framework" 2>/dev/null || true)"} )
+  (( ${#hits} == 1 )) || return 1
+  start=$(( ${hits[1]%%:*} + ${#ASAR_FUSE_SENTINEL} ))
+  version=$(od -An -t u1 -j "$start" -N 1 -- "$framework" 2>/dev/null) || return 1
+  count=$(od -An -t u1 -j $(( start + 1 )) -N 1 -- "$framework" 2>/dev/null) || return 1
+  version=${version//[[:space:]]/}
+  count=${count//[[:space:]]/}
+  [[ $version == <-> && $count == <-> ]] || return 1
+  wire=$(dd if="$framework" bs=1 skip=$(( start + 2 )) count="$count" 2>/dev/null) || return 1
+  print -r -- "$version:$count:$wire"
+}
+
+asar_validate() {
+  local app=$1 work=$TMP/asar-validate plist_hash wire rc=0
+  local asar=$app/Contents/Resources/app.asar
+  ASAR_REASON=
+  ASAR_MAIN=
+  rm -rf -- "$work"
+  mkdir -p -- "$work"
+  if ! plist_hash=$(asar_plist_hash "$app"); then
+    ASAR_REASON="Info.plist has no single SHA256 ElectronAsarIntegrity entry for $ASAR_INTEGRITY_KEY"
+    return 1
+  fi
+  if ! asar_read_header "$asar" "$work/header.json"; then
+    ASAR_REASON="unknown app.asar header format"
+    return 1
+  fi
+  if [[ $(sha256_of "$work/header.json") != $plist_hash ]]; then
+    ASAR_REASON="the app.asar header hash does not match ElectronAsarIntegrity in Info.plist"
+    return 1
+  fi
+  if ! asar_entry_ok "$asar" "$work/header.json" package.json "$work/package.json"; then
+    ASAR_REASON="unknown integrity format (or hash mismatch) for package.json in app.asar"
+    return 1
+  fi
+  if ! ASAR_MAIN=$(jxa asar.js package "$work/package.json" "$work/package.new.json" "$ASAR_BOOT_FILE" 2>/dev/null) || [[ -z $ASAR_MAIN ]]; then
+    ASAR_REASON="package.json in app.asar has no usable main entry (missing, already patched, or an ES module)"
+    return 1
+  fi
+  if ! asar_entry_ok "$asar" "$work/header.json" "$ASAR_MAIN" "$work/main.js" whole; then
+    ASAR_REASON="the main script $ASAR_MAIN is not a packed file with a matching $ASAR_ALGORITHM hash and a $ASAR_BLOCK_SIZE byte block size in app.asar"
+    return 1
+  fi
+  asar_entry "$work/header.json" "$ASAR_BOOT_FILE" || rc=$?
+  if (( rc != 3 )); then
+    ASAR_REASON="app.asar already has a $ASAR_BOOT_FILE entry"
+    return 1
+  fi
+  if ! wire=$(asar_fuse_wire "$app"); then
+    ASAR_REASON="the Electron fuse wire was not found exactly once"
+    return 1
+  fi
+  if [[ $wire != "$ASAR_FUSE_WIRE_VERSION:$ASAR_FUSE_COUNT:"* || ${wire#*:*:} != [01r](#c$ASAR_FUSE_COUNT) ]]; then
+    ASAR_REASON="unknown Electron fuses (version:count:wire $wire, expected $ASAR_FUSE_WIRE_VERSION:$ASAR_FUSE_COUNT)"
+    return 1
+  fi
+  return 0
+}
+
+asar_verify_patched() {
+  local asar=$1 boot=$2 package=$3 main=$4 work=$TMP/asar-verify
+  rm -rf -- "$work"
+  mkdir -p -- "$work"
+  asar_read_header "$asar" "$work/header.json" || return 1
+  ASAR_NEW_HASH=$(sha256_of "$work/header.json") || return 1
+  asar_entry_ok "$asar" "$work/header.json" "$ASAR_BOOT_FILE" "$work/boot.js" && cmp -s -- "$work/boot.js" "$boot" || return 1
+  asar_entry_ok "$asar" "$work/header.json" package.json "$work/package.json" && cmp -s -- "$work/package.json" "$package" || return 1
+  [[ $(jxa asar.js main "$work/package.json" 2>/dev/null) == $ASAR_BOOT_FILE ]] || return 1
+  asar_entry_ok "$asar" "$work/header.json" "$main" "$work/main.js" whole
+}
+
+patch_asar() {
+  local app=$1 work=$TMP/asar-patch original cfg scheme data_size boot_size boot_hash package_size package_hash
+  local new_len payload pickle pad asar=$1/Contents/Resources/app.asar plist=$1/Contents/Info.plist
+  rm -rf -- "$work" || return 1
+  mkdir -p -- "$work" || return 1
+  asar_read_header "$asar" "$work/header.json" || { warn "Could not read the app.asar header of the staged copy."; return 1; }
+  asar_entry_ok "$asar" "$work/header.json" package.json "$work/package.json" || { warn "package.json in the staged app.asar failed its integrity check."; return 1; }
+  original=$(jxa asar.js package "$work/package.json" "$work/package.new.json" "$ASAR_BOOT_FILE") || { warn "Could not rewrite package.json."; return 1; }
+  cfg=$(boot_config_dir) || return 1
+  scheme=$(url_scheme) || return 1
+  jxa asar.js boot "$work/boot.js" "$ASAR_BOOT_VERSION" "$PROFILE_DATA_DIR" "${cfg:--}" "$original" "${(L)scheme}" >/dev/null || { warn "Could not write the boot file."; return 1; }
+  boot_size=$(file_size "$work/boot.js") || return 1
+  package_size=$(file_size "$work/package.new.json") || return 1
+  boot_hash=$(sha256_of "$work/boot.js") || return 1
+  package_hash=$(sha256_of "$work/package.new.json") || return 1
+  data_size=$(( ASAR_SIZE - ASAR_BASE ))
+  jxa asar.js add "$work/header.json" "$work/header.new.json" "$data_size" "$ASAR_BOOT_FILE" "$boot_size" "$boot_hash" package.json "$package_size" "$package_hash" >/dev/null || { warn "Could not extend the app.asar header."; return 1; }
+  new_len=$(file_size "$work/header.new.json") || return 1
+  payload=$(( 4 + (new_len + 3) / 4 * 4 ))
+  pickle=$(( payload + 4 ))
+  pad=$(( payload - 4 - new_len ))
+  {
+    asar_le32 4 || return 1
+    asar_le32 "$pickle" || return 1
+    asar_le32 "$payload" || return 1
+    asar_le32 "$new_len" || return 1
+    cat -- "$work/header.new.json" || return 1
+    if (( pad > 0 )); then
+      head -c "$pad" /dev/zero || return 1
+    fi
+    dd if="$asar" ibs="$ASAR_BASE" skip=1 obs=1048576 2>/dev/null || return 1
+    cat -- "$work/boot.js" "$work/package.new.json" || return 1
+  } > "$work/app.asar" || { warn "Could not assemble the patched app.asar."; return 1; }
+  if ! asar_verify_patched "$work/app.asar" "$work/boot.js" "$work/package.new.json" "$original"; then
+    warn "The patched app.asar failed verification; the staged copy was not changed."
+    return 1
+  fi
+  mv -f -- "$work/app.asar" "$asar" || return 1
+  $PB -c "Set :ElectronAsarIntegrity:${ASAR_INTEGRITY_KEY}:hash $ASAR_NEW_HASH" "$plist" || return 1
+  [[ $(asar_plist_hash "$app") == $ASAR_NEW_HASH ]]
+}
+
+boot_config_dir() {
+  is_main_config "$PROFILE_CONFIG_DIR" || print -r -- "$PROFILE_CONFIG_DIR"
+}
+
+asar_boot_state() {
+  local app=$1 work=$TMP/asar-state plist_hash info boot_main
+  BOOT_PRESENT=0 BOOT_VERSION=0 BOOT_DATA= BOOT_CONFIG= BOOT_HASH_OK=0 BOOT_ENTRY_OK=0 BOOT_MAIN_OK=0
+  rm -rf -- "$work"
+  mkdir -p -- "$work"
+  asar_read_header "$app/Contents/Resources/app.asar" "$work/header.json" || return 1
+  plist_hash=$(asar_plist_hash "$app" || true)
+  if [[ -n $plist_hash && $(sha256_of "$work/header.json") == $plist_hash ]]; then
+    BOOT_HASH_OK=1
+  fi
+  asar_entry "$work/header.json" "$ASAR_BOOT_FILE" || return 0
+  BOOT_PRESENT=1
+  asar_entry_ok "$app/Contents/Resources/app.asar" "$work/header.json" "$ASAR_BOOT_FILE" "$work/boot.js" && BOOT_ENTRY_OK=1
+  [[ -s $work/boot.js ]] || return 0
+  if info=$(jxa asar.js boot-info "$work/boot.js" 2>/dev/null); then
+    IFS=$'\t' read -r BOOT_VERSION BOOT_DATA BOOT_CONFIG boot_main <<<"$info"
+    [[ $BOOT_VERSION == <-> ]] || BOOT_VERSION=0
+    [[ $BOOT_CONFIG != - ]] || BOOT_CONFIG=
+    [[ $BOOT_DATA != - ]] || BOOT_DATA=
+  fi
+  if asar_entry_ok "$app/Contents/Resources/app.asar" "$work/header.json" package.json "$work/package.json" \
+    && [[ $(jxa asar.js main "$work/package.json" 2>/dev/null) == $ASAR_BOOT_FILE ]]; then
+    BOOT_MAIN_OK=1
+  fi
+  return 0
+}
+
 sign_launcher() {
   ts_args
   codesign --force --sign "$SIGN_ID" "${TS_ARGS[@]}" "$1" 2>"$TMP/codesign.err" || { cat "$TMP/codesign.err" >&2; return 1; }
 }
 
 build_launcher() {
-  local icns=${1:-} L=$PROFILE_LAUNCHER LID
+  local icns=${1:-} L=$PROFILE_LAUNCHER LID stage
   LID=$(launcher_id)
   assert_app_path "$L"
   if same_path "$L" "$PROFILE_APP"; then
     die "The launcher path $L is the app copy itself; building the launcher there would delete the copy. Move the copy: claude-profiles migrate-layout $SLUG"
   fi
   assert_ours "$L" "$LID"
+  stage=$TMP/launcher-stage/${L:t}
+  stage_launcher "$icns" "$stage" || die "Could not build the launcher for $SLUG."
+  install_launcher "$stage" || die "Could not move the new launcher into place at $L."
+  rm -rf -- "$L.old"
+}
+
+install_launcher() {
+  local stage=$1 L=$PROFILE_LAUNCHER
+  rm -rf -- "$L.old" || return 1
+  mkdir -p -- "${L:h}" || return 1
+  if [[ -e $L ]]; then
+    "$LSREG" -u "$L" >/dev/null 2>&1 || true
+    mv -- "$L" "$L.old" || return 1
+  fi
+  if ! mv -- "$stage" "$L"; then
+    if [[ -e $L.old ]]; then
+      mv -- "$L.old" "$L"
+    fi
+    return 1
+  fi
+  touch -- "$L"
+  "$LSREG" -f "$L" >/dev/null 2>&1 || true
+}
+
+stage_launcher() {
+  local icns=${1:-} L=$2 LID
+  LID=$(launcher_id)
   say "Building launcher..."
+  mkdir -p -- "${L:h}" || return 1
   local script=$TMP/launcher.applescript bid open_tail
   bid=$(as_string "$PROFILE_BUNDLE_ID")
   if is_main_config "$PROFILE_CONFIG_DIR"; then
@@ -848,19 +1133,17 @@ else
 end if
 EOF
   rm -rf -- "$L"
-  osacompile -o "$L" "$script" >"$TMP/osacompile.log" 2>&1 || { cat "$TMP/osacompile.log" >&2; die "osacompile failed for $L"; }
-  cp -- "$LIB/urlhandler.js" "$L/Contents/Resources/urlhandler.js"
+  osacompile -o "$L" "$script" >"$TMP/osacompile.log" 2>&1 || { cat "$TMP/osacompile.log" >&2; warn "osacompile failed for the launcher of $SLUG."; return 1; }
+  cp -- "$LIB/urlhandler.js" "$L/Contents/Resources/urlhandler.js" || return 1
   local LPLIST="$L/Contents/Info.plist"
-  plutil -replace CFBundleIdentifier -string "$LID" "$LPLIST"
+  plutil -replace CFBundleIdentifier -string "$LID" "$LPLIST" || return 1
   plutil -remove CFBundleIconName "$LPLIST" 2>/dev/null || true
   rm -f -- "$L/Contents/Resources/Assets.car"
   if [[ -f $icns ]]; then
-    cp -- "$icns" "$L/Contents/Resources/applet.icns"
+    cp -- "$icns" "$L/Contents/Resources/applet.icns" || return 1
   fi
   xattr -cr "$L"
-  sign_launcher "$L" || die "Could not sign $L"
-  touch -- "$L"
-  "$LSREG" -f "$L" >/dev/null 2>&1 || true
+  sign_launcher "$L" || { warn "Could not sign the launcher for $SLUG."; return 1; }
 }
 
 dock_read() {
@@ -948,14 +1231,25 @@ dock_same_path() {
 }
 
 dock_profile_args() {
-  DOCK_COPY=$PROFILE_APP
-  DOCK_LAUNCHER=$PROFILE_LAUNCHER
-  DOCK_LID=$(launcher_id)
-  DOCK_LABEL=${PROFILE_LAUNCHER:t:r}
-  DOCK_OLDS=()
   local candidate
-  for candidate in "$LAUNCHER_DIR/${PROFILE_APP:t:r} Launcher.app" "${PROFILE_APP%.app} Launcher.app" "$@"; do
-    dock_same_path "$candidate" "$PROFILE_LAUNCHER" && continue
+  local -a candidates
+  DOCK_OLDS=()
+  if is_self_mode; then
+    DOCK_COPY=
+    DOCK_LAUNCHER=$PROFILE_APP
+    DOCK_LID=$PROFILE_BUNDLE_ID
+    DOCK_LABEL=${PROFILE_APP:t:r}
+    candidates=( "$APPS_DIR/${PROFILE_APP:t}" )
+  else
+    DOCK_COPY=$PROFILE_APP
+    DOCK_LAUNCHER=$PROFILE_LAUNCHER
+    DOCK_LID=$(launcher_id)
+    DOCK_LABEL=${PROFILE_LAUNCHER:t:r}
+  fi
+  candidates+=( "$LAUNCHER_DIR/${PROFILE_APP:t:r} Launcher.app" "${PROFILE_APP%.app} Launcher.app" "$@" )
+  for candidate in $candidates; do
+    [[ -n $candidate ]] || continue
+    dock_same_path "$candidate" "$DOCK_LAUNCHER" && continue
     dock_same_path "$candidate" "$PROFILE_APP" && continue
     (( ${DOCK_OLDS[(Ie)$candidate]} )) || DOCK_OLDS+=( "$candidate" )
   done
@@ -968,7 +1262,7 @@ dock_analyze() {
     [[ -n $idx && $url != - ]] || continue
     pinned=$(dock_url_path "$url")
     [[ -n $pinned ]] || continue
-    if dock_same_path "$pinned" "$DOCK_COPY"; then
+    if [[ -n $DOCK_COPY ]] && dock_same_path "$pinned" "$DOCK_COPY"; then
       DA_COPY+=( $idx )
     elif dock_same_path "$pinned" "$DOCK_LAUNCHER"; then
       DA_LAUNCHER+=( $idx )
@@ -994,7 +1288,15 @@ dock_analyze() {
 }
 
 dock_state() {
-  if (( ${#DA_COPY} || ${#DA_STALE} )); then
+  if is_self_mode; then
+    if (( ${#DA_STALE} || ${#DA_OLD} )); then
+      print -r -- old_launcher_pinned
+    elif (( ! ${#DA_LAUNCHER} )); then
+      print -r -- not_pinned
+    else
+      print -r -- ok
+    fi
+  elif (( ${#DA_COPY} || ${#DA_STALE} )); then
     print -r -- copy_pinned
   elif (( ${#DA_OLD} )); then
     print -r -- old_launcher_pinned
@@ -1016,7 +1318,7 @@ dock_profile_state() {
 dock_sync() {
   local mode=$1 dry=$2 pin=$3 ask=$4
   local work=$TMP/dock-before.plist edited=$TMP/dock-after.plist
-  local -a replace_idx remove_idx plan
+  local -a replace_idx remove_idx plan pinned_idx
   local idx need_launcher count_before count_after expected
   DOCK_CHANGED=0
   if ! dock_read "$work"; then
@@ -1026,23 +1328,29 @@ dock_sync() {
   dock_analyze "$work"
   need_launcher=$(( ${#DA_LAUNCHER} == 0 ))
   if [[ $mode == purge ]]; then
-    for idx in ${(on)${DA_COPY} ${DA_OLD} ${DA_LAUNCHER}}; do
+    pinned_idx=( $DA_COPY $DA_OLD $DA_LAUNCHER )
+    for idx in ${(on)pinned_idx}; do
       remove_idx+=( $idx )
       plan+=( "remove the Dock pin at position $idx" )
     done
   else
+    local stale_text="it carried the identity of the app copy" old_text="old launcher pin"
+    if is_self_mode; then
+      stale_text="it carried the identity of the old launcher"
+      old_text="pin of the old launcher or hidden copy"
+    fi
     for idx in $DA_STALE; do
       replace_idx+=( $idx )
-      plan+=( "refresh the launcher pin at position $idx (it carried the identity of the app copy)" )
+      plan+=( "refresh the pin of $(tilde "$DOCK_LAUNCHER") at position $idx ($stale_text)" )
     done
     for idx in $DA_OLD; do
       if (( need_launcher )); then
         need_launcher=0
         replace_idx+=( $idx )
-        plan+=( "point the old launcher pin at position $idx to $(tilde "$DOCK_LAUNCHER")" )
+        plan+=( "point the $old_text at position $idx to $(tilde "$DOCK_LAUNCHER")" )
       else
         remove_idx+=( $idx )
-        plan+=( "remove the old launcher pin at position $idx (the launcher is already pinned)" )
+        plan+=( "remove the $old_text at position $idx ($(tilde "$DOCK_LAUNCHER") is already pinned)" )
       fi
     done
     for idx in $DA_COPY; do
@@ -1118,11 +1426,17 @@ cmd_dock() {
   setup_colors
   profile_load "$target"
   (( PROFILE_DESKTOP )) || die "Profile \"$SLUG\" has no desktop app."
-  if same_path "$PROFILE_LAUNCHER" "$PROFILE_APP"; then
-    die "The launcher path of \"$SLUG\" is the copy itself ($PROFILE_LAUNCHER). Fix the profile paths with: claude-profiles migrate-layout $SLUG"
-  fi
-  if (( ! dry )) && [[ ! -d $PROFILE_LAUNCHER ]]; then
-    die "Launcher missing: $PROFILE_LAUNCHER. Build it first: claude-profiles launcher $SLUG"
+  if is_self_mode; then
+    if (( ! dry )) && [[ ! -d $PROFILE_APP ]]; then
+      die "App missing: $PROFILE_APP. Build it first: claude-profiles build $SLUG"
+    fi
+  else
+    if same_path "$PROFILE_LAUNCHER" "$PROFILE_APP"; then
+      die "The launcher path of \"$SLUG\" is the copy itself ($PROFILE_LAUNCHER). Fix the profile paths with: claude-profiles migrate-layout $SLUG"
+    fi
+    if (( ! dry )) && [[ ! -d $PROFILE_LAUNCHER ]]; then
+      die "Launcher missing: $PROFILE_LAUNCHER. Build it first: claude-profiles launcher $SLUG"
+    fi
   fi
   dock_profile_args
   dock_sync fix "$dry" "$pin" 1 || exit 1
@@ -1135,7 +1449,7 @@ report_layout_blockers() {
       print -r -- "agent${t}$LA_LABEL[i]${t}$LA_PLIST[i]${t}$LA_LOADED[i]${t}$LA_PROGRAM[i]"
     done
   fi
-  print -u2 -r -- "WARN:  Cannot move \"$SLUG\" to the new layout yet. These old LaunchAgents reference ${PROFILE_APP:t} or $SOURCE_APP and would recreate the copy at the old path, next to the new launcher:"
+  print -u2 -r -- "WARN:  Cannot move \"$SLUG\" to the new layout yet. These old LaunchAgents reference ${PROFILE_APP:t} or $SOURCE_APP and would recreate the copy at its old path:"
   for (( i = 1; i <= ${#LA_LABEL}; i++ )); do
     state="not loaded"
     [[ $LA_LOADED[i] == 1 ]] && state=loaded
@@ -1278,13 +1592,73 @@ cmd_migrate_layout() {
   setup_colors
   profile_load "$target"
   (( PROFILE_DESKTOP )) || die "Profile \"$SLUG\" has no desktop app."
-  if [[ $(layout_of_profile) == hidden ]]; then
-    say "\"$SLUG\" already uses the new layout: copy $PROFILE_APP, launcher $PROFILE_LAUNCHER"
+  if is_self_mode; then
+    say "\"$SLUG\" already runs in self mode: one app at $PROFILE_APP, no launcher."
     return 0
   fi
-  confirm "Move ${PROFILE_APP:t} into $APPS_DIR and rebuild its launcher as ${PROFILE_APP:t} in $LAUNCHER_DIR?" || { say "Cancelled."; return 0; }
+  confirm "Rebuild ${PROFILE_APP:t} from $SOURCE_APP as one app at $LAUNCHER_DIR/${PROFILE_APP:t} (self mode: no launcher, no hidden copy)?" || { say "Cancelled."; return 0; }
   need_lock
-  migrate_layout command
+  migrate_to_self
+}
+
+migrate_to_self() {
+  [[ -d $PROFILE_APP ]] || die "$PROFILE_APP not found. Build it first: claude-profiles build $SLUG"
+  assert_ours "$PROFILE_APP" "$PROFILE_BUNDLE_ID"
+  if is_running "$PROFILE_APP"; then
+    die "Quit \"${PROFILE_APP:t:r}\" first, then re-run."
+  fi
+  legacy_agents_collect "$PROFILE_APP"
+  if (( ${#LA_LABEL} )); then
+    report_layout_blockers
+    exit 3
+  fi
+  [[ -d $SOURCE_APP ]] || die "Not found: $SOURCE_APP"
+  if ! asar_validate "$SOURCE_APP"; then
+    warn "Self mode is not possible with $SOURCE_APP $(app_version "$SOURCE_APP"): $ASAR_REASON."
+    if [[ $(layout_of_profile) == legacy ]]; then
+      warn "Moving \"$SLUG\" to the hidden launcher layout instead."
+      migrate_layout command
+      return 0
+    fi
+    die "\"$SLUG\" stays in launcher mode."
+  fi
+  BUILD_MODE=self
+  build_profile "$SLUG"
+}
+
+build_target_mode() {
+  if [[ -n $BUILD_MODE ]]; then
+    print -r -- "$BUILD_MODE"
+  elif (( KEEP_MODE )); then
+    print -r -- "$PROFILE_MODE"
+  else
+    print -r -- self
+  fi
+}
+
+assert_ours_either() {
+  local target=$1 first=$2 second=$3 id
+  [[ -e $target ]] || return 0
+  id=$(plist_get "$target" CFBundleIdentifier)
+  if [[ ${(L)id} != ${(L)first} && ${(L)id} != ${(L)second} && ${(L)id} != ${(L)$(src_id)} ]]; then
+    die "$target exists and belongs to another app (bundle id \"$id\", expected \"$first\" or \"$second\"). Refusing to touch it."
+  fi
+}
+
+remove_replaced_app() {
+  local target=$1 expected=$2 parent
+  [[ -n $target && -e $target ]] || return 0
+  if [[ ${(L)$(plist_get "$target" CFBundleIdentifier)} != ${(L)expected} ]]; then
+    warn "${target:t} is not this tool's app for \"$SLUG\" (bundle id $(plist_get "$target" CFBundleIdentifier)); left in place."
+    return 0
+  fi
+  parent=${target:h}
+  "$LSREG" -u "$target" >/dev/null 2>&1 || true
+  rm -rf -- "$target"
+  say "Removed $target"
+  if same_path "$parent" "$APPS_DIR"; then
+    rmdir -- "$APPS_DIR" 2>/dev/null || true
+  fi
 }
 
 build_profile() {
@@ -1292,30 +1666,66 @@ build_profile() {
   (( PROFILE_DESKTOP )) || die "Profile \"$SLUG\" has no desktop app (CLI only)."
   [[ -d $SOURCE_APP ]] || die "Not found: $SOURCE_APP"
   source_team_ok || die "$SOURCE_APP is not validly signed by Apple Team ID $SOURCE_TEAM_ID (SOURCE_TEAM_ID in $CONFIG_FILE). Refusing to copy it. Set SOURCE_TEAM_ID to the right Team ID, or to an empty value to disable this check."
-  if [[ $(layout_of_profile) == legacy ]] && has_old_launcher_naming; then
+  local mode LID old_app old_launcher old_mode=$PROFILE_MODE
+  LID=$(launcher_id)
+  mode=$(build_target_mode)
+  if [[ $mode == self ]] && ! asar_validate "$SOURCE_APP"; then
+    warn "Self mode is not possible with $SOURCE_APP $(app_version "$SOURCE_APP"): $ASAR_REASON. Falling back to launcher mode."
+    mode=launcher
+  fi
+  if [[ $mode == self ]] && ! is_self_mode && [[ -d $PROFILE_APP ]]; then
+    legacy_agents_collect "$PROFILE_APP"
+    if (( ${#LA_LABEL} )); then
+      report_layout_blockers
+      warn "Rebuilding in launcher mode for now. After disabling the agents above, run: claude-profiles migrate-layout $SLUG"
+      mode=launcher
+    fi
+  fi
+  if [[ $mode == launcher ]] && ! is_self_mode && [[ $(layout_of_profile) == legacy ]] && has_old_launcher_naming; then
     say "Old layout found: moving the copy into $APPS_DIR first."
     migrate_layout build
     if (( LAYOUT_BLOCKED )); then
       warn "Rebuilding in the old layout for now. After disabling the agents above, run: claude-profiles migrate-layout $SLUG"
     fi
   fi
-  local DST=$PROFILE_APP NAME=${PROFILE_APP:t:r}
-  assert_app_path "$DST"
-  assert_ours "$DST" "$PROFILE_BUNDLE_ID"
-  assert_ours "$PROFILE_LAUNCHER" "$(launcher_id)"
-  mkdir -p -- "${DST:h}" || die "Could not create ${DST:h}."
   if same_path "$PROFILE_DATA_DIR" "$MAIN_DATA_DIR"; then
     die "PROFILE_DATA_DIR is the main Claude data dir; pick another one."
   fi
-  if is_running "$DST"; then
-    die "Quit \"$NAME\" first, then re-run."
-  fi
-  choose_sign_id
-
   if [[ -n $PROFILE_COLOR ]]; then
     resolve_color "$PROFILE_COLOR"
     profile_save
   fi
+  choose_sign_id
+
+  old_app=$PROFILE_APP
+  old_launcher=$PROFILE_LAUNCHER
+  if [[ $mode == self ]]; then
+    is_self_mode || PROFILE_APP=$LAUNCHER_DIR/${old_app:t}
+    PROFILE_LAUNCHER=
+    PROFILE_MODE=self
+  elif is_self_mode; then
+    PROFILE_MODE=launcher
+    PROFILE_APP=$APPS_DIR/${old_app:t}
+    PROFILE_LAUNCHER=$LAUNCHER_DIR/${old_app:t}
+  fi
+  local DST=$PROFILE_APP NAME=${PROFILE_APP:t:r} running
+  assert_app_path "$DST"
+  if [[ $mode == self ]]; then
+    assert_ours_either "$DST" "$PROFILE_BUNDLE_ID" "$LID"
+  else
+    assert_ours "$DST" "$PROFILE_BUNDLE_ID"
+    if [[ $old_mode == self ]]; then
+      assert_ours_either "$PROFILE_LAUNCHER" "$LID" "$PROFILE_BUNDLE_ID"
+    else
+      assert_ours "$PROFILE_LAUNCHER" "$LID"
+    fi
+  fi
+  mkdir -p -- "${DST:h}" || die "Could not create ${DST:h}."
+  for running in "$DST" "$old_app"; do
+    if is_running "$running"; then
+      die "Quit \"${running:t:r}\" first, then re-run."
+    fi
+  done
 
   local STAGE="$DST.new"
   rm -rf -- "$STAGE_DIR" "$DST.new"
@@ -1365,6 +1775,12 @@ build_profile() {
     warn "No usable .icns found; icon left unchanged."
   fi
 
+  if [[ $mode == self ]]; then
+    renew_lock
+    say "Adding the boot file to app.asar (self mode)..."
+    patch_asar "$STAGE" || die "Could not patch app.asar of the staged copy; nothing was changed. Rebuild in launcher mode with: claude-profiles build $SLUG --mode launcher"
+  fi
+
   renew_lock
   say "Re-signing (takes a minute)..."
   xattr -cr "$STAGE"
@@ -1383,12 +1799,17 @@ build_profile() {
   sign_bundle "$STAGE"
   codesign --verify --deep --strict "$STAGE" 2>/dev/null || warn "codesign --verify reported problems (may still launch)."
 
-  if is_running "$DST"; then
-    rm -rf -- "$STAGE"
-    die "\"$NAME\" was started during the build; staged copy discarded. Quit it and re-run."
-  fi
+  for running in "$DST" "$old_app"; do
+    if is_running "$running"; then
+      rm -rf -- "$STAGE"
+      die "\"${running:t:r}\" was started during the build; staged copy discarded. Quit it and re-run."
+    fi
+  done
   renew_lock
   say "Swapping into place..."
+  if [[ -e $DST && ${(L)$(plist_get "$DST" CFBundleIdentifier)} == ${(L)LID} ]]; then
+    "$LSREG" -u "$DST" >/dev/null 2>&1 || true
+  fi
   rm -rf -- "$DST.old"
   if [[ -e $DST ]]; then
     mv -- "$DST" "$DST.old"
@@ -1399,21 +1820,57 @@ build_profile() {
     fi
     die "Could not move the staged build into place; the previous copy was kept."
   fi
-  rm -rf -- "$DST.old"
-
   touch -- "$DST"
   "$LSREG" -f "$DST" >/dev/null 2>&1 || true
-
-  build_launcher "$(copy_icns_path "$DST")"
+  if [[ $mode == self ]]; then
+    profile_save
+    rm -rf -- "$DST.old"
+  else
+    local LAUNCHER_STAGE=$TMP/launcher-stage/${PROFILE_LAUNCHER:t}
+    if ! stage_launcher "$(copy_icns_path "$DST")" "$LAUNCHER_STAGE" || ! install_launcher "$LAUNCHER_STAGE"; then
+      "$LSREG" -u "$DST" >/dev/null 2>&1 || true
+      rm -rf -- "$DST"
+      if [[ -e $DST.old ]]; then
+        mv -- "$DST.old" "$DST"
+        "$LSREG" -f "$DST" >/dev/null 2>&1 || true
+      fi
+      die "Could not build the launcher at $PROFILE_LAUNCHER; the previous app and profile were kept."
+    fi
+    profile_save
+    rm -rf -- "$DST.old" "$PROFILE_LAUNCHER.old"
+  fi
+  if ! same_path "$old_app" "$DST" && { [[ $mode == self ]] || ! same_path "$old_app" "$PROFILE_LAUNCHER"; }; then
+    remove_replaced_app "$old_app" "$PROFILE_BUNDLE_ID"
+  fi
+  if [[ $mode == self && -n $old_launcher ]] && ! same_path "$old_launcher" "$DST"; then
+    remove_replaced_app "$old_launcher" "$LID"
+  fi
   if (( ! IS_AUTO )); then
-    killall Dock 2>/dev/null || true
+    if [[ $old_mode != $PROFILE_MODE ]]; then
+      dock_profile_args "$old_app" "$old_launcher"
+      DOCK_CHANGED=0
+      dock_sync fix 0 0 0 || true
+      (( DOCK_CHANGED )) || dock_restart
+    else
+      dock_restart
+    fi
+  elif [[ $old_mode != $PROFILE_MODE ]]; then
+    notify "$NAME now runs in $PROFILE_MODE mode. If its Dock icon misbehaves, run: claude-profiles dock $SLUG fix" "$NAME"
   fi
   say "Done: $DST"
-  say "Launcher: $PROFILE_LAUNCHER"
+  if is_self_mode; then
+    say "Mode: self (one app per profile; no launcher)"
+  else
+    say "Launcher: $PROFILE_LAUNCHER"
+  fi
   say "Data: $PROFILE_DATA_DIR"
   say "Config: $PROFILE_CONFIG_DIR"
   if (( ! IS_AUTO )); then
-    say "Next: pin '${PROFILE_LAUNCHER:t:r}' (${PROFILE_LAUNCHER:h}) to the Dock, open it, then run: claude-profiles check $SLUG"
+    if is_self_mode; then
+      say "Next: pin '$NAME' (${DST:h}) to the Dock, open it, then run: claude-profiles check $SLUG"
+    else
+      say "Next: pin '${PROFILE_LAUNCHER:t:r}' (${PROFILE_LAUNCHER:h}) to the Dock, open it, then run: claude-profiles check $SLUG"
+    fi
   fi
 }
 
@@ -1433,7 +1890,29 @@ stale_reason() {
       return 0
     fi
   done
-  if [[ ! -d $PROFILE_LAUNCHER ]]; then
+  if is_self_mode; then
+    asar_boot_state "$PROFILE_APP" || true
+    if (( ! BOOT_PRESENT || ! BOOT_ENTRY_OK || ! BOOT_MAIN_OK )); then
+      print -r -- "self-mode boot entry $ASAR_BOOT_FILE is missing or not wired into package.json"
+      return 0
+    fi
+    if (( BOOT_VERSION != ASAR_BOOT_VERSION )); then
+      print -r -- "boot entry is version $BOOT_VERSION, this tool writes version $ASAR_BOOT_VERSION"
+      return 0
+    fi
+    if (( ! BOOT_HASH_OK )); then
+      print -r -- "ElectronAsarIntegrity in Info.plist does not match the app.asar header"
+      return 0
+    fi
+    if [[ $BOOT_DATA != "$PROFILE_DATA_DIR" ]]; then
+      print -r -- "boot entry uses the data dir $BOOT_DATA, the profile uses $PROFILE_DATA_DIR"
+      return 0
+    fi
+    if [[ $BOOT_CONFIG != "$(boot_config_dir)" ]]; then
+      print -r -- "boot entry uses the config dir ${BOOT_CONFIG:-~/.claude}, the profile uses $PROFILE_CONFIG_DIR"
+      return 0
+    fi
+  elif [[ ! -d $PROFILE_LAUNCHER ]]; then
     print -r -- "launcher app is missing"
     return 0
   fi
@@ -1645,6 +2124,9 @@ scan_candidates() {
       config_dir=$(launcher_setting "$decompiled" 'CLAUDE_CONFIG_DIR=')
       [[ $data_dir == - ]] && data_dir=
       [[ $config_dir == - ]] && config_dir=
+    elif asar_boot_state "$app" && (( BOOT_PRESENT )); then
+      data_dir=$BOOT_DATA
+      config_dir=$BOOT_CONFIG
     fi
     [[ -n $config_dir ]] || config_dir=$(plist_get "$app" LSEnvironment:CLAUDE_CONFIG_DIR)
     name=${base#Claude }
@@ -1783,6 +2265,7 @@ cmd_show() {
       print -r -- "app${t}$SOURCE_APP"
       print -r -- "launcher${t}-"
       print -r -- "layout${t}-"
+      print -r -- "mode${t}-"
       print -r -- "dock${t}-"
       print -r -- "bundle_id${t}$(src_id)"
       print -r -- "data_dir${t}$MAIN_DATA_DIR"
@@ -1798,13 +2281,13 @@ cmd_show() {
   fi
   profile_load "$slug"
   if (( PLAIN )); then
-    local app=$PROFILE_APP launcher=$PROFILE_LAUNCHER bundle_id=$PROFILE_BUNDLE_ID data_dir=$PROFILE_DATA_DIR layout dock d
+    local app=$PROFILE_APP launcher=${PROFILE_LAUNCHER:--} bundle_id=$PROFILE_BUNDLE_ID data_dir=$PROFILE_DATA_DIR layout dock d mode=$PROFILE_MODE
     layout=$(layout_of_profile)
     dock=-
     if (( PROFILE_DESKTOP )); then
       dock=$(dock_profile_state)
     else
-      app=- launcher=- bundle_id=- data_dir=- layout=-
+      app=- launcher=- bundle_id=- data_dir=- layout=- mode=-
     fi
     print -r -- "slug${t}$SLUG"
     print -r -- "name${t}$PROFILE_NAME"
@@ -1815,6 +2298,7 @@ cmd_show() {
     print -r -- "app${t}$app"
     print -r -- "launcher${t}$launcher"
     print -r -- "layout${t}$layout"
+    print -r -- "mode${t}$mode"
     print -r -- "dock${t}$dock"
     print -r -- "bundle_id${t}$bundle_id"
     print -r -- "data_dir${t}$data_dir"
@@ -1842,13 +2326,13 @@ cmd_show() {
   say "desktop     $PROFILE_DESKTOP"
   say "cli         $PROFILE_CLI"
   say "app         $PROFILE_APP ($state)"
-  say "launcher    $PROFILE_LAUNCHER"
+  say "launcher    ${PROFILE_LAUNCHER:--}"
   if (( PROFILE_DESKTOP )); then
-    if [[ $(layout_of_profile) == legacy ]]; then
-      say "layout      legacy (run: claude-profiles migrate-layout $SLUG)"
-    else
-      say "layout      hidden"
-    fi
+    case $(layout_of_profile) in
+      self) say "mode        self (one app per profile; no launcher)" ;;
+      legacy) say "mode        launcher, legacy layout (run: claude-profiles migrate-layout $SLUG)" ;;
+      *) say "mode        launcher, hidden copy (run: claude-profiles migrate-layout $SLUG)" ;;
+    esac
     local dock_now
     dock_now=$(dock_profile_state)
     case $dock_now in
@@ -1930,7 +2414,7 @@ pick_from_menu() {
 }
 
 cmd_new() {
-  local name="" slug="" color_kind="" color_value="" desktop="" cli="" data_dir="" config_dir="" link_mode="" no_build=0
+  local name="" slug="" color_kind="" color_value="" desktop="" cli="" data_dir="" config_dir="" link_mode="" no_build=0 mode=$BUILD_MODE
   local -a dirs links reply cfg_labels link_choices link_labels link_src_cfg link_src_dir link_cwd
   local i n l d cwd idx other_slug other_data other_cfg palette_color
   while (( $# )); do
@@ -1950,6 +2434,7 @@ cmd_new() {
       --link) need_value "$@"; links+=( "$2" ); shift 2 ;;
       --link-mode) need_value "$@"; link_mode=$2; shift 2 ;;
       --no-build) no_build=1; shift ;;
+      --mode) need_value "$@"; mode=$2; shift 2 ;;
       --yes|-y) YES=1; shift ;;
       --plain) PLAIN=1; shift ;;
       *) usage_error "new: unknown option $1" ;;
@@ -1957,6 +2442,7 @@ cmd_new() {
   done
   setup_colors
   reject_control_chars "new options" "$name" "$slug" "$data_dir" "$config_dir" "$color_value" "${dirs[@]}" "${links[@]}"
+  [[ -z $mode || $mode == (self|launcher) ]] || usage_error "--mode must be self or launcher"
   ensure_config
   local interactive=0
   can_prompt && interactive=1
@@ -2025,6 +2511,7 @@ cmd_new() {
   PROFILE_NAME=$name
   PROFILE_DESKTOP=$desktop
   PROFILE_CLI=$cli
+  PROFILE_MODE=${mode:-self}
   [[ -n $data_dir ]] && PROFILE_DATA_DIR=$(abs_path "$data_dir")
   [[ -n $config_dir ]] && PROFILE_CONFIG_DIR=$(abs_path "$config_dir")
   profile_fill_defaults
@@ -2037,7 +2524,7 @@ cmd_new() {
     if [[ -e $PROFILE_APP ]]; then
       die "$PROFILE_APP already exists. To register an existing copy use: claude-profiles adopt"
     fi
-    if [[ -e $PROFILE_LAUNCHER ]]; then
+    if [[ -n $PROFILE_LAUNCHER && -e $PROFILE_LAUNCHER ]]; then
       die "$PROFILE_LAUNCHER already exists. To register an existing copy use: claude-profiles adopt"
     fi
   fi
@@ -2124,6 +2611,7 @@ cmd_new() {
 
   if (( desktop && ! no_build )); then
     need_lock
+    BUILD_MODE=$PROFILE_MODE
     build_profile "$SLUG"
   elif (( desktop )); then
     say "Skipped the build. Run: claude-profiles build $SLUG"
@@ -2133,7 +2621,9 @@ cmd_new() {
   fi
   if (( PLAIN )); then
     local launcher_out=-
-    if (( desktop )) && [[ -d $PROFILE_LAUNCHER ]]; then
+    if (( desktop )) && is_self_mode && [[ -d $PROFILE_APP ]]; then
+      launcher_out=$PROFILE_APP
+    elif (( desktop )) && [[ -n $PROFILE_LAUNCHER && -d $PROFILE_LAUNCHER ]]; then
       launcher_out=$PROFILE_LAUNCHER
     fi
     print -r -- "created"$'\t'"$SLUG"$'\t'"$launcher_out"
@@ -2145,12 +2635,14 @@ cmd_build() {
   while (( $# )); do
     case $1 in
       --all) all=1; shift ;;
+      --mode) need_value "$@"; BUILD_MODE=$2; shift 2 ;;
       --yes|-y) YES=1; shift ;;
       --plain) PLAIN=1; shift ;;
-      -*) usage_error "build <slug>|--all" ;;
+      -*) usage_error "build <slug>|--all [--mode self|launcher]" ;;
       *) target=$1; shift ;;
     esac
   done
+  valid_mode_choice "$BUILD_MODE" || usage_error "--mode must be self or launcher"
   setup_colors
   ensure_config
   if (( all )); then
@@ -2166,13 +2658,13 @@ cmd_build() {
     for s in $targets; do
       count=$(( count + 1 ))
       say "${C_BOLD}== $s${C_RESET}"
-      if ! CLAUDE_PROFILES_LOCKED=1 CLAUDE_PROFILES_AUTO=1 zsh "$SELF" build "$s"; then
+      if ! CLAUDE_PROFILES_LOCKED=1 CLAUDE_PROFILES_AUTO=1 CLAUDE_PROFILES_APP_MODE=$BUILD_MODE zsh "$SELF" build "$s"; then
         failed=$(( failed + 1 ))
         warn "build of \"$s\" failed"
       fi
     done
     (( count )) || say "No desktop profiles."
-    killall Dock 2>/dev/null || true
+    dock_restart
     (( failed == 0 )) || die "$failed build(s) failed."
     return 0
   fi
@@ -2194,6 +2686,9 @@ cmd_launcher() {
   setup_colors
   profile_load "$target"
   (( PROFILE_DESKTOP )) || die "Profile \"$SLUG\" has no desktop app."
+  if is_self_mode; then
+    die "\"$SLUG\" runs in self mode: one app per profile, no launcher. To switch back: claude-profiles build $SLUG --mode launcher"
+  fi
   [[ -d $PROFILE_APP ]] || die "$PROFILE_APP not found. Build it first: claude-profiles build $SLUG"
   need_lock
   choose_sign_id keep
@@ -2251,8 +2746,8 @@ cmd_recolor() {
   sign_bundle "$PROFILE_APP" >/dev/null 2>&1 || die "Could not re-sign $PROFILE_APP; run: claude-profiles build $SLUG"
   touch -- "$PROFILE_APP"
   "$LSREG" -f "$PROFILE_APP" >/dev/null 2>&1 || true
-  build_launcher "$dst_icns"
-  killall Dock 2>/dev/null || true
+  is_self_mode || build_launcher "$dst_icns"
+  dock_restart
   if is_running "$PROFILE_APP"; then
     say "Done. ${PROFILE_APP:t:r} is running: its Dock icon updates after you quit and reopen it."
   else
@@ -2364,22 +2859,37 @@ cmd_check() {
     return 0
   fi
   [[ -d $DST ]] || die "$DST not found. Build it first: claude-profiles build $SLUG"
-  if same_path "$PROFILE_LAUNCHER" "$DST"; then
-    fail "the launcher path is the copy itself ($PROFILE_LAUNCHER): rebuilding the launcher would delete the copy. Fix the profile paths with: claude-profiles migrate-layout $SLUG"
-  elif [[ -d $PROFILE_LAUNCHER && ${(L)$(plist_get "$PROFILE_LAUNCHER" CFBundleIdentifier)} == ${(L)PROFILE_BUNDLE_ID} ]]; then
-    fail "$PROFILE_LAUNCHER holds a copy of Claude (bundle id $PROFILE_BUNDLE_ID), not a launcher. Fix: claude-profiles build $SLUG"
-  fi
-  if [[ $(layout_of_profile) == legacy ]]; then
-    warnl "old layout: Spotlight and Raycast list two entries ('$NAME' and the launcher). Fix: claude-profiles migrate-layout $SLUG"
+  if is_self_mode; then
+    ok "self mode: one app per profile, no launcher ($DST)"
+    if [[ -e $APPS_DIR/${DST:t} ]]; then
+      warnl "a hidden copy from launcher mode is still at $APPS_DIR/${DST:t}; remove it so search shows one entry"
+    fi
   else
-    ok "layout: the copy is hidden in ${DST:h}; '${PROFILE_LAUNCHER:t:r}' is the only entry in search"
+    if same_path "$PROFILE_LAUNCHER" "$DST"; then
+      fail "the launcher path is the copy itself ($PROFILE_LAUNCHER): rebuilding the launcher would delete the copy. Fix the profile paths with: claude-profiles migrate-layout $SLUG"
+    elif [[ -d $PROFILE_LAUNCHER && ${(L)$(plist_get "$PROFILE_LAUNCHER" CFBundleIdentifier)} == ${(L)PROFILE_BUNDLE_ID} ]]; then
+      fail "$PROFILE_LAUNCHER holds a copy of Claude (bundle id $PROFILE_BUNDLE_ID), not a launcher. Fix: claude-profiles build $SLUG"
+    fi
+    if [[ $(layout_of_profile) == legacy ]]; then
+      warnl "old layout: Spotlight and Raycast list two entries ('$NAME' and the launcher). Fix: claude-profiles migrate-layout $SLUG"
+    else
+      ok "layout: the copy is hidden in ${DST:h}; '${PROFILE_LAUNCHER:t:r}' is the only entry in search"
+    fi
+    infol "launcher mode: the Dock shows the launcher and the running copy as two icons. One app per profile: claude-profiles migrate-layout $SLUG"
   fi
   case $(dock_profile_state) in
     copy_pinned) warnl "the app copy is pinned in the Dock: opening it while it is closed starts it on the MAIN profile. Fix: claude-profiles dock $SLUG fix" ;;
-    old_launcher_pinned) warnl "the Dock still pins the old launcher, which no longer exists. Fix: claude-profiles dock $SLUG fix" ;;
+    old_launcher_pinned)
+      if is_self_mode; then
+        warnl "the Dock pins an old launcher or hidden copy of this profile. Fix: claude-profiles dock $SLUG fix"
+      else
+        warnl "the Dock still pins the old launcher, which no longer exists. Fix: claude-profiles dock $SLUG fix"
+      fi ;;
   esac
   if [[ -n $(ls -A "$DATA" 2>/dev/null) ]]; then
     ok "data dir is populated ($DATA)"
+  elif is_self_mode; then
+    fail "$DATA is empty/missing: open '$NAME' once; if it stays empty, the boot entry did not apply."
   else
     fail "$DATA is empty/missing: launch the copy via its launcher first; if it stays empty, the app ignores --user-data-dir."
   fi
@@ -2389,9 +2899,17 @@ cmd_check() {
   if (( ${#main_pids} == 0 )); then
     infol "copy is not running right now"
   else
-    local pid=$main_pids[1] cmdline envline lspid
+    local pid=$main_pids[1] cmdline envline lspid pid_list=${(j:,:)all_pids} open_count open_files
+    open_files=$(lsof -p "$pid_list" 2>/dev/null || true)
     cmdline=$(ps -ww -o command= -p "$pid" 2>/dev/null || true)
-    if [[ $cmdline == *"--user-data-dir=$DATA"* ]]; then
+    if is_self_mode; then
+      open_count=$(grep -cF "$DATA/" <<<"$open_files" || true)
+      if [[ $open_count != 0 ]]; then
+        ok "PID $pid uses $DATA ($open_count open files across ${#all_pids} processes; no --user-data-dir needed)"
+      else
+        fail "PID $pid has no open files in $DATA: the boot entry did not apply. Quit it and run: claude-profiles build $SLUG"
+      fi
+    elif [[ $cmdline == *"--user-data-dir=$DATA"* ]]; then
       ok "PID $pid runs with --user-data-dir=$DATA"
     else
       fail "PID $pid has no --user-data-dir: it is using the MAIN Claude profile. Quit it and use the launcher."
@@ -2405,23 +2923,32 @@ cmd_check() {
       fi
     elif [[ $envline == *" CLAUDE_CONFIG_DIR=$CFG "* ]]; then
       ok "PID $pid runs with CLAUDE_CONFIG_DIR=$CFG"
+    elif is_self_mode; then
+      fail "PID $pid has no CLAUDE_CONFIG_DIR=$CFG in its environment (LSEnvironment missing?): Code sessions may use ~/.claude. Rebuild: claude-profiles build $SLUG"
     else
       fail "PID $pid has no CLAUDE_CONFIG_DIR=$CFG: Code sessions use ~/.claude. Quit it and use the launcher."
     fi
-    local pid_list=${(j:,:)all_pids} open_count
     if ! is_main_config "$CFG"; then
-      open_count=$(lsof -p "$pid_list" 2>/dev/null | grep -cF "$MAIN_CONFIG_DIR/" || true)
+      open_count=$(grep -cF "$MAIN_CONFIG_DIR/" <<<"$open_files" || true)
       if [[ $open_count == 0 ]]; then
         ok "no open files in ~/.claude (${#all_pids} processes)"
       else
         fail "$open_count open files in ~/.claude"
       fi
     fi
-    open_count=$(lsof -p "$pid_list" 2>/dev/null | grep -cF "$MAIN_DATA_DIR/" || true)
+    open_count=$(grep -cF "$MAIN_DATA_DIR/" <<<"$open_files" || true)
     if [[ $open_count == 0 ]]; then
-      ok "no open files in the main Claude data dir (${#all_pids} processes)"
+      ok "no open files in the main Claude data dir, Crashpad included (${#all_pids} processes)"
     else
       fail "$open_count open files in the main Claude data dir"
+    fi
+    if is_self_mode; then
+      open_count=$(grep -cF "$MAIN_LOGS_DIR/" <<<"$open_files" || true)
+      if [[ $open_count == 0 ]]; then
+        ok "no open files in the main Claude logs dir (${#all_pids} processes)"
+      else
+        fail "$open_count open files in the main Claude logs dir $MAIN_LOGS_DIR"
+      fi
     fi
     lspid=$(ls_pid "$PROFILE_BUNDLE_ID")
     if [[ $lspid == 0 ]]; then
@@ -2474,7 +3001,9 @@ cmd_check() {
   else
     warnl "copy is $(app_version "$DST"), source is $([[ -d $SOURCE_APP ]] && app_version "$SOURCE_APP" || print missing): rebuild pending"
   fi
-  if [[ -d $PROFILE_LAUNCHER ]]; then
+  if is_self_mode; then
+    check_boot_entry
+  elif [[ -d $PROFILE_LAUNCHER ]]; then
     ok "launcher present ($PROFILE_LAUNCHER)"
   else
     fail "launcher missing: claude-profiles launcher $SLUG"
@@ -2485,13 +3014,45 @@ cmd_check() {
   scheme=$(url_scheme)
   handler=$(url_get "$scheme")
   if [[ ${(L)handler} == ${(L)PROFILE_BUNDLE_ID} ]]; then
-    fail "$scheme:// opens this copy (bare launch -> MAIN desktop profile). Run: claude-profiles link main"
+    if is_self_mode; then
+      fail "$scheme:// opens this copy. It never claims the scheme by itself in self mode, so a link window is open (claude-profiles link $SLUG) or something else set it. Revert: claude-profiles link main"
+    else
+      fail "$scheme:// opens this copy (bare launch -> MAIN desktop profile). Run: claude-profiles link main"
+    fi
   elif [[ ${(L)handler} == ${(L)$(src_id)} ]]; then
     ok "$scheme:// opens $handler"
   else
     infol "$scheme:// opens: $handler"
   fi
   return 0
+}
+
+check_boot_entry() {
+  asar_boot_state "$DST" || { fail "could not read the app.asar header of $NAME. Fix: claude-profiles build $SLUG"; return 0; }
+  if (( ! BOOT_PRESENT )); then
+    fail "app.asar has no $ASAR_BOOT_FILE entry: the copy starts on the MAIN profile. Fix: claude-profiles build $SLUG"
+    return 0
+  fi
+  if (( BOOT_ENTRY_OK && BOOT_MAIN_OK )); then
+    ok "boot entry $ASAR_BOOT_FILE is present, passes its integrity hash and is package.json main"
+  else
+    fail "boot entry $ASAR_BOOT_FILE fails its integrity hash or is not package.json main. Fix: claude-profiles build $SLUG"
+  fi
+  if (( BOOT_VERSION == ASAR_BOOT_VERSION )); then
+    ok "boot entry version $BOOT_VERSION is current"
+  else
+    warnl "boot entry version $BOOT_VERSION, this tool writes version $ASAR_BOOT_VERSION. Fix: claude-profiles build $SLUG"
+  fi
+  if (( BOOT_HASH_OK )); then
+    ok "ElectronAsarIntegrity in Info.plist equals the recomputed app.asar header hash"
+  else
+    fail "ElectronAsarIntegrity in Info.plist does not match the app.asar header: the copy will not start. Fix: claude-profiles build $SLUG"
+  fi
+  if [[ $BOOT_DATA == "$DATA" && $BOOT_CONFIG == "$(boot_config_dir)" ]]; then
+    ok "boot entry selects data dir $DATA and config dir ${BOOT_CONFIG:-~/.claude (default)}"
+  else
+    fail "boot entry selects data dir ${BOOT_DATA:--} and config dir ${BOOT_CONFIG:-~/.claude}, the profile uses $DATA and $CFG. Fix: claude-profiles build $SLUG"
+  fi
 }
 
 cmd_link() {
@@ -2597,7 +3158,11 @@ cmd_remove() {
     [[ ! -e $PROFILE_LAUNCHER ]] || { assert_app_path "$PROFILE_LAUNCHER"; assert_ours "$PROFILE_LAUNCHER" "$(launcher_id)"; }
   fi
   local summary="Remove profile \"$SLUG\" ($PROFILE_NAME)"
-  (( PROFILE_DESKTOP )) && summary+=", ${PROFILE_APP:t} and ${PROFILE_LAUNCHER:t}"
+  if (( PROFILE_DESKTOP )) && is_self_mode; then
+    summary+=", ${PROFILE_APP:t}"
+  elif (( PROFILE_DESKTOP )); then
+    summary+=", ${PROFILE_APP:t} and ${PROFILE_LAUNCHER:t}"
+  fi
   (( delete_data )) && summary+=", DELETE data dir $PROFILE_DATA_DIR"
   (( delete_config )) && summary+=", DELETE config dir $PROFILE_CONFIG_DIR"
   confirm "$summary?" || { say "Cancelled."; return 0; }
@@ -2709,7 +3274,12 @@ cmd_adopt() {
   PROFILE_CLI=1
   PROFILE_APP=$app
   PROFILE_BUNDLE_ID=$bundle_id
-  if [[ -n $launcher ]]; then
+  if [[ -z $launcher ]] && asar_boot_state "$app" && (( BOOT_PRESENT )); then
+    PROFILE_MODE=self
+    [[ -n $data_dir || -z $BOOT_DATA ]] || data_dir=$BOOT_DATA
+    [[ -n $config_dir ]] || config_dir=${BOOT_CONFIG:-$MAIN_CONFIG_DIR}
+    say "${app:t} carries the self-mode boot entry: adopting it in self mode (no launcher)."
+  elif [[ -n $launcher ]]; then
     PROFILE_LAUNCHER=$(abs_path "$launcher")
     same_path "$PROFILE_LAUNCHER" "$app" && die "--launcher must not be the copy itself ($app)."
   else
@@ -3031,6 +3601,7 @@ cmd_uninstall_agent() {
 
 auto_fix_bare_launch() {
   local exe pattern pid bare_pid="" name=${PROFILE_APP:t:r}
+  is_self_mode && return 0
   exe=$(plist_get "$PROFILE_APP" CFBundleExecutable)
   pattern="^$(re_escape "$PROFILE_APP")/Contents/MacOS/$(re_escape "${exe:-Claude}")( |\$)"
   for pid in ${(f)"$(pgrep -f "$pattern" 2>/dev/null || true)"}; do
@@ -3109,6 +3680,10 @@ auto_profile() {
     log_line "$SLUG: up to date ($source_version)"
     return 0
   fi
+  if is_self_mode && ! asar_validate "$SOURCE_APP"; then
+    log_line "$SLUG: stale ($reason) but self mode is not possible with $source_version ($ASAR_REASON): keeping the current copy, not rebuilding"
+    return 0
+  fi
   if ! codesign --verify --strict "$SOURCE_APP" >/dev/null 2>&1; then
     log_line "$SLUG: stale ($reason) but $SOURCE_APP fails its signature check (update in progress?): retrying next interval"
     return 0
@@ -3141,7 +3716,7 @@ auto_profile() {
   fi
   log_line "$SLUG: rebuilding: $reason"
   local build_status=0
-  CLAUDE_PROFILES_LOCKED=1 CLAUDE_PROFILES_AUTO=1 zsh "$SELF" build "$SLUG" 2>&1 | stamp_lines || build_status=$?
+  CLAUDE_PROFILES_LOCKED=1 CLAUDE_PROFILES_AUTO=1 CLAUDE_PROFILES_KEEP_MODE=1 zsh "$SELF" build "$SLUG" 2>&1 | stamp_lines || build_status=$?
   if (( build_status != 0 )); then
     log_line "$SLUG: rebuild FAILED (exit $build_status)"
     return 1

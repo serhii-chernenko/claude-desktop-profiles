@@ -18,7 +18,10 @@ struct ProfileDetailView: View {
     private var cliEnabled: Bool { details?.flag("cli") ?? !profile.isDesktop }
     private var launcher: String? { details?.value("launcher") }
     private var projects: [ProfileProject] { model.profileProjects[profile.slug] ?? [] }
-    private var usesLegacyLayout: Bool { profile.isDesktop && (details?.usesLegacyLayout ?? false) }
+    private var isSelfMode: Bool { profile.isDesktop && (details?.isSelfMode ?? false) }
+    private var canMoveToSelfMode: Bool { profile.isDesktop && (details?.canMoveToSelfMode ?? false) }
+    private var appPath: String? { details?.value("app") ?? profile.app }
+    private var openTarget: String? { isSelfMode ? appPath : launcher }
 
     var body: some View {
         Form {
@@ -84,7 +87,9 @@ struct ProfileDetailView: View {
             .padding(.vertical, 4)
             ActionRow(title: "Icon color",
                       caption: profile.isDesktop
-                        ? "Tints the Dock icon of this profile's app and launcher in a few seconds. No rebuild."
+                        ? (isSelfMode
+                            ? "Tints the Dock icon of this profile's app in a few seconds. No rebuild."
+                            : "Tints the Dock icon of this profile's app and launcher in a few seconds. No rebuild.")
                         : "Used to tell profiles apart in this window.",
                       systemImage: "paintpalette") {
                 ColorPicker("Icon color", selection: $colorDraft, supportsOpacity: false)
@@ -98,12 +103,14 @@ struct ProfileDetailView: View {
         Section("Actions") {
             if profile.isDesktop {
                 ActionRow(title: "Open",
-                          caption: "Starts this profile through its launcher, on its own data folder and sign-in.",
+                          caption: isSelfMode
+                            ? "Starts this profile on its own data folder and sign-in."
+                            : "Starts this profile through its launcher, on its own data folder and sign-in.",
                           systemImage: "play.circle") {
                     Button("Open") {
-                        if let launcher { SystemActions.openApplication(launcher) }
+                        if let openTarget { SystemActions.openApplication(openTarget) }
                     }
-                    .disabled(launcher.map { !FileManager.default.fileExists(atPath: $0) } ?? true)
+                    .disabled(openTarget.map { !FileManager.default.fileExists(atPath: $0) } ?? true)
                 }
                 ActionRow(title: "Link sign-in",
                           caption: "Sends claude:// sign-in links to this profile for 15 minutes, so a browser login lands here instead of in Main Claude.",
@@ -119,9 +126,9 @@ struct ProfileDetailView: View {
                     }
                     .disabled(model.isBusy)
                 }
-                if usesLegacyLayout {
+                if canMoveToSelfMode {
                     ActionRow(title: "Move to new layout",
-                              caption: "Hides the app copy from Spotlight/Raycast; the launcher becomes 'Claude \(profile.name)'",
+                              caption: "One app per profile; no launcher. Rebuilds the copy as 'Claude \(profile.name)' in Applications, so its Dock pin and the running app are one icon.",
                               systemImage: "eye.slash") {
                         Button("Move to New Layout") {
                             Task { await model.migrateLayout(profile) }
@@ -134,7 +141,9 @@ struct ProfileDetailView: View {
                 }
                 if details?.dockNeedsFix ?? false {
                     ActionRow(title: "Fix Dock",
-                              caption: "Keeps only the launcher in the Dock; a pinned app copy would open on the wrong profile",
+                              caption: isSelfMode
+                                ? "Keeps one Dock pin for this profile and repoints pins of its old launcher or hidden copy"
+                                : "Keeps only the launcher in the Dock; a pinned app copy would open on the wrong profile",
                               systemImage: "dock.rectangle") {
                         Button("Fix Dock") {
                             Task { await model.run("Fix the Dock for \(profile.name)", ["dock", profile.slug, "fix", "--yes"]) }
@@ -143,7 +152,9 @@ struct ProfileDetailView: View {
                     }
                 }
                 ActionRow(title: "Rebuild",
-                          caption: "Recreates the app copy and launcher from the current Claude.app. Sign-in and history are kept.",
+                          caption: isSelfMode
+                            ? "Recreates the app from the current Claude.app. Sign-in and history are kept."
+                            : "Recreates the app copy and launcher from the current Claude.app. Sign-in and history are kept.",
                           systemImage: "arrow.triangle.2.circlepath") {
                     Button("Rebuild") {
                         Task { await model.run("Rebuild \(profile.name)", ["build", profile.slug]) }
@@ -169,7 +180,9 @@ struct ProfileDetailView: View {
             }
             ActionRow(title: "Remove",
                       caption: profile.isDesktop
-                        ? "Deletes the app copy, launcher and profile entry. Data and history are kept unless you choose otherwise."
+                        ? (isSelfMode
+                            ? "Deletes the app and the profile entry. Data and history are kept unless you choose otherwise."
+                            : "Deletes the app copy, launcher and profile entry. Data and history are kept unless you choose otherwise.")
                         : "Removes the profile entry and its claude-\(profile.slug) command. History is kept unless you choose otherwise.",
                       systemImage: "trash") {
                 Button("Remove…", role: .destructive) {
@@ -200,8 +213,15 @@ struct ProfileDetailView: View {
     private var paths: some View {
         Section("Locations") {
             if profile.isDesktop {
-                PathRow(title: "App", path: details?.value("app") ?? profile.app)
-                PathRow(title: "Launcher", path: launcher)
+                PathRow(title: "App", path: appPath)
+                if isSelfMode {
+                    LabeledContent("Launcher") {
+                        Text("One app per profile; no launcher")
+                            .foregroundStyle(.secondary)
+                    }
+                } else {
+                    PathRow(title: "Launcher", path: launcher)
+                }
                 PathRow(title: "Data folder", path: details?.value("data_dir") ?? profile.dataDir)
             }
             PathRow(title: "Config folder", path: details?.value("config_dir") ?? profile.configDir)

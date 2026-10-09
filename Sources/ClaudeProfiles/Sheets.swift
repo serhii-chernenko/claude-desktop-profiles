@@ -117,7 +117,9 @@ struct RemoveSheet: View {
     var body: some View {
         CommandSheet(title: "Remove “\(profile.name)”?",
                      subtitle: profile.isDesktop
-                        ? "The app copy, its launcher and the profile entry are deleted. Your main Claude is not touched."
+                        ? (details?.isSelfMode == true
+                            ? "The app and the profile entry are deleted. Your main Claude is not touched."
+                            : "The app copy, its launcher and the profile entry are deleted. Your main Claude is not touched.")
                         : "The profile entry, its claude-\(profile.slug) command and folder rules are removed.",
                      logStart: logStart, error: error, width: 560, height: logStart == nil ? 400 : 560) {
             Section {

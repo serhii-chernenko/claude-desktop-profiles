@@ -111,7 +111,7 @@ struct CreateProfileSheet: View {
         Section {
             ActionRow(title: "Claude desktop app",
                       caption: model.sourceAppPresent
-                        ? "Builds a tinted copy of Claude.app plus a launcher, with its own sign-in and Dock icon."
+                        ? "Builds a tinted copy of Claude.app with its own sign-in and Dock icon: one app per profile."
                         : "Needs Claude.app in Applications. Install it first to create a desktop profile.",
                       systemImage: "macwindow") {
                 Toggle("Desktop app", isOn: $desktop)

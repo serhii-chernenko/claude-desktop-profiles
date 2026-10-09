@@ -2,6 +2,8 @@
 
 Use this when `bin/claude-profiles` cannot be used (it fails, or the repository is incomplete). Every step is a plain shell command. If the utility works, prefer `bin/claude-profiles ... --yes` instead; this document is its fallback and its specification.
 
+The tool builds profiles in **self mode** by default: one app, `/Applications/Claude <Name>.app`, whose `app.asar` carries a boot file that selects the data folder ([how-it-works.md](how-it-works.md), fact 13). That patch rewrites a binary archive and its integrity hash, so **do not do it by hand: use the CLI** (`bin/claude-profiles build <slug> --yes`, or `migrate-layout <slug> --yes` for an existing launcher-mode profile). Steps 1 to 6 below build the older **launcher mode** (a hidden copy plus a launcher), which needs no patch and is what to fall back to when the CLI cannot run. Step 6a has the read-only check whether self mode is possible on the installed Claude, and how to verify a self-mode app.
+
 All commands are zsh. Replace the placeholders in the variables block once, then run the steps in order in the same shell session.
 
 ## Who does what
@@ -12,7 +14,7 @@ All commands are zsh. Replace the placeholders in the variables block once, then
 
 1. **`claude-profiles setup`** (signing identity import, trust prompt, key partition list, `launchctl bootstrap`). It needs the login password and cannot run in a sandboxed or auto-mode agent. Never run it for the user and never run its individual `security` or `launchctl` steps by hand. Ask the user to open Terminal and run `<repo>/bin/claude-profiles setup`.
 2. **The Keychain prompt** for "Claude Safe Storage" on the first launch of a new copy: the user must click **Always Allow**. Likewise macOS privacy prompts (microphone, screen recording, accessibility).
-3. **Pinning the launcher to the Dock** (drag `/Applications/Claude <Name>.app`, the launcher, onto the Dock, or right-click its icon, Options, Keep in Dock). The app copy itself is in the hidden folder `/Applications/.claude-profiles` and is never pinned. `migrate-layout` repoints a dead Dock pin of the old launcher and drops pins of the copy by itself; `dock <slug> fix --dry-run` previews it (`show --plain` prints a `dock` row, `copy_pinned` or `old_launcher_pinned` when it is needed).
+3. **Pinning the profile to the Dock**: drag `/Applications/Claude <Name>.app` onto the Dock, or right-click its icon, Options, Keep in Dock. In self mode that is the app itself; in launcher mode it is the launcher, and the copy in the hidden folder `/Applications/.claude-profiles` is never pinned. `migrate-layout` refreshes or repoints existing pins by itself; `dock <slug> fix --dry-run` previews it (`show --plain` prints a `dock` row, `copy_pinned` or `old_launcher_pinned` when it is needed).
 4. **Signing in** to the new account inside the new copy.
 
 **Ask the user before doing any of these:**
@@ -35,7 +37,7 @@ These all accept `--yes` and the read-only ones accept `--plain`. Run `bin/claud
 | Register a hand-made copy | `scan --plain` prints `candidate` rows (app, launcher, bundle ID, data dir, config dir, name, signing identity or `-`); pass them to `adopt --slug s --name N --app PATH [--launcher PATH] [--data-dir P] [--config-dir P] [--identity NAME]` (the identity is detected from the copy when omitted) |
 | Shell hook in `~/.zshrc` | `shell-init status --plain`, then `shell-init install` or `shell-init uninstall` (an idempotent marked block; ask first, because it edits a shell startup file) |
 | Old hand-made LaunchAgents | `legacy-agents --plain` to list, `legacy-agents disable LABEL --yes` to unload and rename one (ask first) |
-| Move an old-layout profile to the new layout | `show <slug> --plain` prints `layout` `legacy` or `hidden`. For `legacy`: quit the copy (ask first), `migrate-layout <slug> --yes`. It exits 3 and prints `agent` rows when an old LaunchAgent would recreate the copy; ask the user, then `legacy-agents disable LABEL --yes` and retry. `build` does the same move on its own. The Dock pins are fixed by the same command (`dock <slug> fix`) |
+| Move a launcher-mode profile to self mode (one app) | `show <slug> --plain` prints `mode` `self` or `launcher` (and `layout` `self`, `hidden` or `legacy`). For `launcher`: quit the copy (ask first), `migrate-layout <slug> --yes`. It rebuilds the copy from Claude.app with the boot file, puts it at `/Applications/Claude <Name>.app` in place of the launcher, removes the hidden copy and refreshes the Dock pin. It exits 3 and prints `agent` rows when an old LaunchAgent would recreate the copy; ask the user, then `legacy-agents disable LABEL --yes` and retry. A plain `build` does the same move; `build <slug> --mode launcher` goes back |
 | CLI on the PATH | `install-cli` copies the tool to `~/.local/share/claude-profiles` and links `~/.local/bin/claude-profiles` |
 
 `setup` is never in this list: it is always run by the human in Terminal, because it needs their login password. The native app does the same: its **Set Up** button opens Terminal for the user and never handles the password.
@@ -281,6 +283,56 @@ The restore step runs 10 seconds after a fresh launch and does nothing while a `
 
 The launcher is the thing to start and to pin. Opening `$APP` directly runs it on the main data folder. `osacompile` resolves `application id "$BUNDLE_ID"`, so the copy must be registered with `lsregister -f` (step 5) before this step. The launcher's `open -b` finds the copy through that registration, not through its path.
 
+## 6a. Self mode: use the CLI, then verify
+
+Check first, read-only, whether the installed Claude can be patched (this is what the CLI checks before every self-mode build; if either hash differs, stay in launcher mode):
+
+```zsh
+ASAR="$SRC/Contents/Resources/app.asar"
+u32() { od -An -t u4 -j "$2" -N 4 -- "$1" | tr -d " \n"; }
+LEN=$(u32 "$ASAR" 12); BASE=$(( 8 + $(u32 "$ASAR" 4) ))
+head -c $(( 16 + LEN )) "$ASAR" | tail -c "$LEN" > "$WORK/header.json"
+echo "header $(shasum -a 256 "$WORK/header.json" | cut -d" " -f1)"
+echo "plist  $($PB -c "Print :ElectronAsarIntegrity:Resources/app.asar:hash" "$SRC/Contents/Info.plist")"
+read -r OFF SIZE HASH BLOCKS BLOCK_SIZE <<<"$(osascript -l JavaScript -e "function run(a){const h=JSON.parse(\$.NSString.stringWithContentsOfFileEncodingError(a[0],4,null).js);const e=h.files[\"package.json\"];return [e.offset,e.size,e.integrity.hash,e.integrity.blocks.join(\",\"),e.integrity.blockSize].join(\" \")}" "$WORK/header.json")"
+echo "package.json $(dd if="$ASAR" bs=1 skip=$(( BASE + OFF )) count="$SIZE" 2>/dev/null | shasum -a 256 | cut -d" " -f1) entry $HASH blocks $BLOCKS block size $BLOCK_SIZE"
+```
+
+The two header lines must match, the three package.json hashes must be equal, and the block size must be 4194304. Then build with the CLI (the patch, the integrity hash, the inside-out signature and the Dock fix are all done there):
+
+```zsh
+bin/claude-profiles new --name "$NAME" --slug "$SLUG" --color "$COLOR" --data-dir "$DATA_DIR" --config-dir "$CONFIG_DIR" --yes
+```
+
+For an existing profile use `bin/claude-profiles migrate-layout "$SLUG" --yes` (quit the copy first). If `build` prints `WARN: Self mode is not possible`, it built launcher mode instead; that is a safe result.
+
+Verify a self-mode app (`bin/claude-profiles check "$SLUG"` runs the same checks):
+
+```zsh
+APP="/Applications/Claude $NAME.app"
+A="$APP/Contents/Resources/app.asar"
+L=$(u32 "$A" 12); head -c $(( 16 + L )) "$A" | tail -c "$L" > "$WORK/self-header.json"
+[[ $(shasum -a 256 "$WORK/self-header.json" | cut -d" " -f1) == $($PB -c "Print :ElectronAsarIntegrity:Resources/app.asar:hash" "$APP/Contents/Info.plist") ]] && echo "OK plist hash matches the header" || echo "FAIL hash mismatch: the app will not start"
+grep -q "\"cdp-boot.js\"" "$WORK/self-header.json" && echo "OK boot entry present" || echo "FAIL no boot entry"
+[[ ! -e $LAUNCHER || $($PB -c "Print :CFBundleIdentifier" "$LAUNCHER/Contents/Info.plist") == "$BUNDLE_ID" ]] && echo "OK no separate launcher"
+```
+
+After the user opened the app once (any way: Dock, Spotlight, `open -b "$BUNDLE_ID"`):
+
+```zsh
+PIDS=$(pgrep -f "^$APP/Contents/" | paste -sd, -)
+echo "open files in the profile data dir: $(lsof -p "$PIDS" 2>/dev/null | grep -cF "$DATA_DIR/")"
+echo "open files in the main data dir (Crashpad included): $(lsof -p "$PIDS" 2>/dev/null | grep -cF "$HOME/Library/Application Support/Claude/")"
+echo "open files in ~/.claude: $(lsof -p "$PIDS" 2>/dev/null | grep -cF "$HOME/.claude/")"
+echo "open files in the main logs: $(lsof -p "$PIDS" 2>/dev/null | grep -cF "$HOME/Library/Logs/Claude/")"
+PID=$(pgrep -f "^$APP/Contents/MacOS/" | head -1)
+ps -E -ww -o command= -p "$PID" | tr " " "\n" | grep -qxF "CLAUDE_CONFIG_DIR=$CONFIG_DIR" && echo "OK CLAUDE_CONFIG_DIR set"
+lsappinfo info -only pid -app "$BUNDLE_ID"
+osascript -l JavaScript lib/urlhandler.js get claude
+```
+
+The first count must be above zero and the next three `0`; `lsappinfo` must print the same PID; the handler must still be the source app's bundle ID. A self-mode app has no `--user-data-dir` in its own command line (its helpers do); that is expected.
+
 ## 7. CLI profile (config dir)
 
 A CLI profile is only a config directory. Its login is stored separately in the Keychain by Claude Code itself. A CLI-only profile (`--no-desktop`) needs only this step.
@@ -391,7 +443,9 @@ launchctl print "gui/$(id -u)/io.github.claude-desktop-profiles.rebuild" >/dev/n
 
 A `FAIL` line means the copy was started without the launcher: quit it and open the launcher. Both `open files` counts should be `0`. The System Events line should show a non-zero PID; a PID of 0 means the executable was wrapped (step 2 was violated).
 
-## 8b. Move an old layout to the new one
+## 8b. Move an old layout to the hidden launcher layout
+
+`claude-profiles migrate-layout` moves launcher-mode profiles to self mode (step 6a). The by-hand move below only applies when you stay in launcher mode.
 
 Older versions kept the copy at `/Applications/Claude <Name>.app` next to `/Applications/Claude <Name> Launcher.app`, so search showed two entries. `claude-profiles migrate-layout <slug>` does this move; by hand, with the copy quit and no old LaunchAgent (`legacy-agents`) referencing it:
 
@@ -413,7 +467,7 @@ Then repeat step 6 (the launcher is built at `/Applications/Claude $NAME.app`, t
 
 Rebuild by repeating steps 1 to 6 with the same variables; the data and config dirs are untouched. The automatic version of this is the LaunchAgent that `setup` installs.
 
-A copy is stale when its `CFBundleShortVersionString` or `CFBundleVersion` differs from the source's, its `CFBundleIdentifier` is not `$BUNDLE_ID`, the launcher is missing, or `LSEnvironment:CLAUDE_CONFIG_DIR` is missing:
+A self-mode app is rebuilt with `bin/claude-profiles build <slug> --yes` only (it repeats the patch). A copy is stale when its `CFBundleShortVersionString` or `CFBundleVersion` differs from the source's, its `CFBundleIdentifier` is not `$BUNDLE_ID`, the launcher (launcher mode) or the boot entry (self mode) is missing, or `LSEnvironment:CLAUDE_CONFIG_DIR` is missing:
 
 ```zsh
 for key in CFBundleShortVersionString CFBundleVersion; do
@@ -423,7 +477,7 @@ done
 
 ## 10. Recolor only
 
-Repeat step 3 on a fresh icon set taken from the **source** app (`$SRC/Contents/Resources/electron.icns`, never from the already tinted copy) and write the result over the copy's `.icns` and the launcher's `applet.icns`. Then re-sign only the outer bundles and refresh:
+Repeat step 3 on a fresh icon set taken from the **source** app (`$SRC/Contents/Resources/electron.icns`, never from the already tinted copy) and write the result over the copy's `.icns` and, in launcher mode, the launcher's `applet.icns`. Then re-sign only the outer bundles and refresh (in self mode there is no `$LAUNCHER` line; `app.asar` is not touched):
 
 ```zsh
 TS=(); [[ $SIGN_ID != - ]] && TS=(--timestamp=none)
@@ -437,11 +491,11 @@ The change shows in the Dock after the copy restarts.
 
 ## 11. `claude://` sign-in links
 
-Signing in on the web returns to the desktop app through a `claude://` link, which macOS sends to the app registered for the scheme (normally the original Claude). To sign in inside a copy, the scheme must temporarily point to the copy. Prefer `bin/claude-profiles link <slug>` and `bin/claude-profiles link main` (the latter restores the original). Changing the handler by hand is the user's decision: ask first, and remind them to restore it to `com.anthropic.claudefordesktop` when the sign-in is done. A copy that opens on the wrong profile after a link click is the symptom of a forgotten restore. Launching any copy also takes the scheme over (Electron registers itself on startup); the launcher built in step 6 undoes that after about 10 seconds, so a copy started some other way (Finder, Spotlight) leaves the scheme pointing at it until `claude-profiles link main` or the `auto` agent restores it.
+Signing in on the web returns to the desktop app through a `claude://` link, which macOS sends to the app registered for the scheme (normally the original Claude). To sign in inside a copy, the scheme must temporarily point to the copy. Prefer `bin/claude-profiles link <slug>` and `bin/claude-profiles link main` (the latter restores the original). Changing the handler by hand is the user's decision: ask first, and remind them to restore it to `com.anthropic.claudefordesktop` when the sign-in is done. A copy that opens on the wrong profile after a link click is the symptom of a forgotten restore. A self-mode app never takes the scheme over (its boot file turns that registration into a no-op). In launcher mode, launching a copy takes the scheme over (Electron registers itself on startup); the launcher built in step 6 undoes that after about 10 seconds, so a copy started some other way (Finder, Spotlight) leaves the scheme pointing at it until `claude-profiles link main` or the `auto` agent restores it.
 
 ## 12. Remove a profile
 
-Ask first. Quit the copy, check that `claude://` does not point at it, then remove the app and the launcher; keep the data and config dirs unless the user explicitly asks to delete them. `claude-profiles remove` restores the handler itself before deleting. By hand: run `osascript -l JavaScript lib/urlhandler.js get claude` and, if it prints `$BUNDLE_ID`, ask the user and run `osascript -l JavaScript lib/urlhandler.js set claude <source-bundle-id>` (the source app's `CFBundleIdentifier`).
+Ask first. Quit the copy, check that `claude://` does not point at it, then remove the app and, in launcher mode, the launcher; keep the data and config dirs unless the user explicitly asks to delete them. `claude-profiles remove` restores the handler itself before deleting. By hand: run `osascript -l JavaScript lib/urlhandler.js get claude` and, if it prints `$BUNDLE_ID`, ask the user and run `osascript -l JavaScript lib/urlhandler.js set claude <source-bundle-id>` (the source app's `CFBundleIdentifier`).
 
 ```zsh
 osascript -e "tell application id \"$BUNDLE_ID\" to quit"
@@ -458,4 +512,4 @@ Deleting `$DATA_DIR` signs the account out of that copy; deleting `$CONFIG_DIR` 
 rm -rf "$WORK"
 ```
 
-Then tell the user what is done and list the human-only steps still pending: pin the launcher, sign in, click **Always Allow** on the Keychain prompt, and optionally run `setup` in Terminal.
+Then tell the user what is done and list the human-only steps still pending: pin `Claude <Name>` (the app in self mode, the launcher in launcher mode), sign in, click **Always Allow** on the Keychain prompt, and optionally run `setup` in Terminal.

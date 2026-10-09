@@ -10,9 +10,9 @@ Utility to run several Claude accounts on macOS (desktop copies with their own d
    - `adopt` registers a hand-made copy that `scan --plain` reports as a `candidate`;
    - `shell-init install` adds the shell hook to `~/.zshrc` (ask first);
    - `legacy-agents` lists old LaunchAgents that watch Claude.app.
-   - `migrate-layout <slug> --yes` moves a profile whose `show --plain` says `layout legacy` into the new layout (copy hidden in `/Applications/.claude-profiles`, launcher `/Applications/Claude <Name>.app`); ask first, it needs the copy quit. It also repoints the Dock pins; `dock <slug> fix --dry-run` shows what `dock <slug> fix --yes` changes when `show --plain` prints a `dock` row of `copy_pinned` or `old_launcher_pinned`.
+   - `migrate-layout <slug> --yes` turns a profile whose `show --plain` says `mode launcher` into self mode: one app at `/Applications/Claude <Name>.app` whose `app.asar` boot file selects the data dir, no launcher, no hidden copy ([docs/how-it-works.md](docs/how-it-works.md), fact 13). Ask first, it needs the copy quit. New profiles and a plain `build` use self mode too; never patch `app.asar` by hand. It also refreshes the Dock pin; `dock <slug> fix --dry-run` shows what `dock <slug> fix --yes` changes when `show --plain` prints a `dock` row of `copy_pinned` or `old_launcher_pinned`.
 3. If the CLI fails or is missing, follow [docs/for-claude.md](docs/for-claude.md) step by step.
-4. Finish by listing the steps only the human can do: pin the launcher to the Dock, sign in, click **Always Allow** on the Keychain prompt, and run `setup` in Terminal.
+4. Finish by listing the steps only the human can do: pin `Claude <Name>` to the Dock (the app itself in self mode, the launcher in launcher mode), sign in, click **Always Allow** on the Keychain prompt, and run `setup` in Terminal.
 
 ## Rules
 

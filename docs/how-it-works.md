@@ -4,7 +4,10 @@ This page explains the mechanics behind `claude-profiles`, including the approac
 
 ## Overview
 
-A **desktop profile** is a full copy of `/Applications/Claude.app` with a different bundle ID, a tinted icon and its own data folder. A tiny **launcher app** starts the copy with the right switches. The copy lives in the hidden `APPS_DIR` (default `/Applications/.claude-profiles`) and the launcher in `/Applications`, so search shows one entry per profile (fact 12). A **CLI profile** is a separate `CLAUDE_CONFIG_DIR`. Both halves are independent: a profile may have either or both.
+A **desktop profile** is a full copy of `/Applications/Claude.app` with a different bundle ID, a tinted icon and its own data folder. It runs in one of two modes:
+
+- **Self mode** (the default): the copy is `/Applications/Claude <Name>.app` and a boot file inside its `app.asar` selects the data folder (fact 13). One app per profile, no launcher.
+- **Launcher mode** (the fallback, and how older profiles were built): a tiny **launcher app** starts the copy with the right switches. The copy lives in the hidden `APPS_DIR` (default `/Applications/.claude-profiles`) and the launcher in `/Applications`, so search shows one entry per profile (fact 12). A **CLI profile** is a separate `CLAUDE_CONFIG_DIR`. Both halves are independent: a profile may have either or both.
 
 ```
 ~/.config/claude-profiles/
@@ -15,15 +18,16 @@ A **desktop profile** is a full copy of `/Applications/Claude.app` with a differ
   state/link-at           "<slug> <epoch>", written by `link <slug>`: the open sign-in window
 ```
 
-A profile file holds `PROFILE_NAME`, `PROFILE_COLOR`, `PROFILE_SIGN_IDENTITY`, `PROFILE_DESKTOP`, `PROFILE_CLI`, `PROFILE_APP`, `PROFILE_LAUNCHER`, `PROFILE_BUNDLE_ID`, `PROFILE_DATA_DIR`, `PROFILE_CONFIG_DIR` and `PROFILE_DIRS`.
+A profile file holds `PROFILE_NAME`, `PROFILE_COLOR`, `PROFILE_SIGN_IDENTITY`, `PROFILE_DESKTOP`, `PROFILE_CLI`, `PROFILE_MODE`, `PROFILE_APP`, `PROFILE_LAUNCHER`, `PROFILE_BUNDLE_ID`, `PROFILE_DATA_DIR`, `PROFILE_CONFIG_DIR` and `PROFILE_DIRS`.
 
+- `PROFILE_MODE` is `self` or `launcher`, the mode the app is built in. A file without it (written by an older version) is `launcher`. In self mode `PROFILE_LAUNCHER` is empty and `show --plain` prints `launcher -`, `layout self`, `mode self`.
 - `PROFILE_DESKTOP=0` (`--no-desktop`) is a CLI-only profile: no app and no launcher. `list --plain` prints `-` for its `app` and `data_dir`, so a client must not offer recolor, rebuild or link for it.
 - `PROFILE_CLI=0` (`--no-cli`) is a desktop-only profile: no `claude-<slug>` function and no folder rules.
 - `PROFILE_COLOR` shows as `-` in `list --plain` when unset. `--hue DEG` is the **target** hue of the icon, not a rotation; the tool turns it into the color with that hue and the source icon's own saturation and value, and stores that hex. `PROFILE_HUE` and `PROFILE_SAT` of older profile files are ignored.
 - `PROFILE_SIGN_IDENTITY` is empty by default (resolved automatically, see fact 6). `adopt` fills it from the copy's current signature, `set <slug> sign-identity NAME` changes it.
 - `scan --plain` leaves out project folders without a `.jsonl` transcript and config dirs that have no `projects/`, `.claude.json` or `settings.json` (the main one is always listed).
 
-Environment variables: `CLAUDE_PROFILES_HOME` (settings folder), `CLAUDE_PROFILES_LOG` (log file), `CLAUDE_PROFILES_APPS_DIR` (overrides `APPS_DIR`), `CLAUDE_PROFILES_LAUNCHER_DIR` (launcher folder, default `/Applications`), `CLAUDE_PROFILES_AGENTS_DIR` (folder scanned for old LaunchAgents), `CLAUDE_PROFILES_NO_URL_SET` (never change the `claude://` handler; for tests) and, in the shell hook, `CLAUDE_PROFILES_MODE` (`auto`, `warn` or `off`, overrides `CLI_RULE_MODE`). `lib/json.js` copies a `.claude.json` to `<file>.claude-profiles.bak` before it rewrites it.
+Environment variables: `CLAUDE_PROFILES_HOME` (settings folder), `CLAUDE_PROFILES_LOG` (log file), `CLAUDE_PROFILES_APPS_DIR` (overrides `APPS_DIR`), `CLAUDE_PROFILES_LAUNCHER_DIR` (folder of self-mode apps and launchers, default `/Applications`), `CLAUDE_PROFILES_APP_MODE` (`self` or `launcher`, the mode of `new` and `build` without `--mode`), `CLAUDE_PROFILES_KEEP_MODE` (set by `auto` for its rebuilds: keep the current mode), `CLAUDE_PROFILES_AGENTS_DIR` (folder scanned for old LaunchAgents), `CLAUDE_PROFILES_NO_URL_SET` (never change the `claude://` handler; for tests) and, in the shell hook, `CLAUDE_PROFILES_MODE` (`auto`, `warn` or `off`, overrides `CLI_RULE_MODE`). `lib/json.js` copies a `.claude.json` to `<file>.claude-profiles.bak` before it rewrites it.
 
 ## Facts that shape the design
 
@@ -33,7 +37,7 @@ The obvious way to inject arguments is to replace the executable with a shell wr
 
 ### 2. `--user-data-dir` is the only way to split the desktop data
 
-Claude's packaged build deletes `CLAUDE_USER_DATA_DIR` from its environment at startup, so neither `LSEnvironment` nor `open --env` can select a data folder. The Chromium switch `--user-data-dir=<dir>` works, and it must be passed as an argument. That is why a launcher exists at all.
+Claude's packaged build deletes `CLAUDE_USER_DATA_DIR` from its environment at startup, so neither `LSEnvironment` nor `open --env` can select a data folder. The Chromium switch `--user-data-dir=<dir>` works, and it must be passed as an argument. That is why launcher mode needs a launcher. Self mode sets the same folder from inside the app instead (fact 13).
 
 ### 3. `CLAUDE_CONFIG_DIR` is not stripped
 
@@ -49,9 +53,9 @@ else:                    open -n -b <bundle-id> --env CLAUDE_CONFIG_DIR=<cfg> --
 
 The launcher bundle carries `lib/urlhandler.js` in `Contents/Resources`. The slug, the bundle ids, the scheme, the stamp path and `LINK_TTL` are baked into the applet when it is built, so changing `LINK_TTL` takes effect after the next `launcher` or `build`. `open --env` needs macOS 13 or newer. As a backstop, the copy's `Info.plist` also carries `LSEnvironment` with `CLAUDE_CONFIG_DIR`, which covers launches that bypass the launcher for the config dir (but not for the data dir, see the next point).
 
-### 5. A bare launch uses the main data folder
+### 5. A bare launch uses the main data folder (launcher mode)
 
-Opening the copy from Spotlight, Finder, a `claude://` link or session restore starts it without `--user-data-dir`. It then runs on the main data folder at the same time as the real Claude; there is no single-instance guard. `claude-profiles auto` detects a copy whose command line lacks `--user-data-dir=<data>`, quits it and reopens it through the launcher. If it does not quit within 20 seconds it leaves it alone and notifies you.
+Opening the copy from Spotlight, Finder, a `claude://` link or session restore starts it without `--user-data-dir`. It then runs on the main data folder at the same time as the real Claude; there is no single-instance guard. `claude-profiles auto` detects a copy whose command line lacks `--user-data-dir=<data>`, quits it and reopens it through the launcher. A self-mode copy has no such argument and needs none, so `auto` skips it. If it does not quit within 20 seconds it leaves it alone and notifies you.
 
 ### 6. Why a stable signing identity
 
@@ -87,9 +91,9 @@ Modern Claude.app has both `CFBundleIconName` (an asset catalog, `Assets.car`) a
 
 The whole iconset takes about a second. The top of the colored region is within about 1/255 per channel of the requested color (the shade is already about 0.4% at 6% of the way down). The mean color of the whole icon is about 4% darker than the requested color.
 
-### 10. Launching a copy takes over `claude://`
+### 10. Launching a copy takes over `claude://` (launcher mode)
 
-Electron registers the app as the default handler for its URL scheme on startup. Every launch of a profile copy therefore makes the copy the owner of `claude://`. Regular Claude then stops receiving deep links, and a link click launches the copy bare, on the main data folder (fact 5). Without a fix only `auto` (every 15 minutes) would notice.
+Electron registers the app as the default handler for its URL scheme on startup (Claude calls `app.setAsDefaultProtocolClient` for `claude` and, depending on features, `claude-nest`, `claude-nest-prod` or `claude-dev`). A self-mode copy turns these calls into no-ops (fact 13), so the rest of this fact applies to launcher mode. Every launch of a profile copy therefore makes the copy the owner of `claude://`. Regular Claude then stops receiving deep links, and a link click launches the copy bare, on the main data folder (fact 5). Without a fix only `auto` (every 15 minutes) would notice.
 
 The launcher fixes it after a fresh launch (not in the "already running" branch). It starts a detached shell step that sleeps 10 seconds, then restores the handler to the source app's bundle id with the bundled `urlhandler.js`, but only when all of these hold:
 
@@ -104,16 +108,18 @@ Everything inside a downloaded app carries the `com.apple.quarantine` attribute,
 
 `install-cli` is the way out. It copies `bin/`, `lib/` and `VERSION` out of the app with `ditto --noqtn` (no quarantine flag) into `~/.local/share/claude-profiles`, applies `chmod -R go-w`, swaps the new copy into place and links `~/.local/bin/claude-profiles` to it. The copy is a stable, user-owned location that has never been quarantined, which is exactly what the LaunchAgent and the Terminal need. The app starts the CLI as `/bin/zsh -f <script>`, so it never depends on the script's executable bit or on the quarantine state. Everyday commands run from the copy inside the app; the **Set Up** button first runs `install-cli` and then opens Terminal on the installed copy. After installing a new version of the app, press **Update** in Settings (or run `install-cli`) so the installed copy matches.
 
-### 12. Two apps, one search entry
+### 12. Two apps, one search entry (launcher mode)
 
 Spotlight and Raycast list every app they index, so a copy next to its launcher showed two nearly identical entries, and the wrong one (the copy) starts on the main data folder (fact 5). The layout therefore splits them by folder:
 
 - The copy is `$APPS_DIR/Claude <Name>.app`. `APPS_DIR` defaults to `/Applications/.claude-profiles`: Spotlight does not index dot-folders and Finder hides them. The copy keeps `CFBundleName` and `CFBundleDisplayName` `Claude <Name>`, so the Dock and ⌘-Tab show the same name as the launcher. It is always registered with `lsregister -f` at its real path.
 - The launcher is `/Applications/Claude <Name>.app`, named exactly like the profile, with bundle ID `<copy bundle ID>.launcher`.
 - The launcher's `open -n -b <bundle id>` and the `application id` lookups in its applet resolve the copy through Launch Services, not through its path. That is why `osacompile` of the launcher needs the copy registered first, and why a stale registration of an old path must be removed (`lsregister -u`): two registered apps with one bundle ID make `open -b` ambiguous.
-- A profile is in the **old layout** (`show --plain` prints `layout legacy`) when its copy is not in `APPS_DIR`. The tool only migrates automatically when the launcher is also named `<copy> Launcher.app` next to the copy; other hand-made arrangements are migrated only by an explicit `migrate-layout`.
+- Even so, a running launcher-mode profile shows two Dock icons (the pinned launcher and the running copy), and every launch path that bypasses the launcher (a pin of the copy, `claude://` links, login restore) starts the copy bare (fact 5). Self mode (fact 13) removes both problems.
 
-`migrate-layout <slug>` (and `build`, before it rebuilds a profile in the old layout) does, in this order:
+A profile is in the **old layout** (`show --plain` prints `layout legacy`) when its copy is not in `APPS_DIR`. The tool only migrates automatically when the launcher is also named `<copy> Launcher.app` next to the copy; other hand-made arrangements are migrated only by an explicit `migrate-layout`.
+
+The steps below are the move from the old layout to the hidden layout. Today `migrate-layout` moves launcher-mode profiles to self mode instead (fact 13); these steps still run when a `build --mode launcher` finds the old layout, and when `migrate-layout` falls back because self mode is not possible:
 
 1. refuses while the copy is running, and while a legacy LaunchAgent (the `legacy-agents` detection: its program or watch paths contain the copy's path or the source app's) is present. Such an agent would rebuild the copy at the old path, which is now the launcher's path. The command exits 3 and prints the agent rows with `--plain`; inside `build` the block is only a warning and the build proceeds in the old layout, so Claude updates keep being applied;
 2. resolves the signing identity (`choose_sign_id`) so a failure aborts before anything moved;
@@ -125,7 +131,50 @@ Spotlight and Raycast list every app they index, so a copy next to its launcher 
 
 The Dock keeps a bookmark for each pinned app, so a pin of the copy follows it into `APPS_DIR`, and a pin of the removed `… Launcher.app` goes dead. `check` warns about the old layout and fails if the launcher path is the copy itself (building a launcher there would delete the copy; `build_launcher` and `remove` refuse that case too). `remove` also deletes `APPS_DIR` when it is left empty.
 
+### 13. Self mode: the boot file inside `app.asar`
+
+Self mode makes the copy pick its own data folder, so a profile is one app at `/Applications/Claude <Name>.app`, every launch path is correct, and the Dock pin and the running app are one icon. It works within the two constraints above: `CFBundleExecutable` stays the real Electron binary (fact 1), and nothing depends on `CLAUDE_USER_DATA_DIR` (fact 2).
+
+**What Claude.app is made of.** These facts were verified on Claude 2.31226.0 and are re-checked on the source app before every self-mode build (`asar_validate`, read-only):
+
+- `app.asar` is a Chromium pickle: `uint32 4`, `uint32 header pickle size`, `uint32 header payload size`, `uint32 JSON length`, the header JSON (UTF-8), zero padding to a multiple of 4, then the file data. The data starts at `8 + header pickle size`; the `offset` of each entry is a decimal string relative to that start.
+- `Info.plist` has `ElectronAsarIntegrity → Resources/app.asar → {algorithm SHA256, hash}`. `hash` is the SHA-256 of the header JSON string only, not of the whole archive.
+- Each packed file has `integrity {algorithm SHA256, hash, blockSize 4194304, blocks}`: `hash` covers the whole file, `blocks` holds one SHA-256 per 4 MiB block. Electron checks the blocks when it reads the file.
+- The Electron fuses (after the sentinel `dL7pKGdnNz796PbbjQWNKmHXBZaB9tsX` in `Electron Framework`, wire version 1, 9 fuses) enable `EnableEmbeddedAsarIntegrityValidation` and `OnlyLoadAppFromAsar` and disable `RunAsNode`, `NODE_OPTIONS` and the inspect arguments. Only code inside an `app.asar` that matches the plist runs.
+- `package.json` `main` (today `.vite/build/index.pre.js`) is read from the archive, never hardcoded. `app.asar.unpacked` exists and is left alone.
+
+**The patch** (`patch_asar`, on the staged copy only; `/Applications/Claude.app` is never written):
+
+1. Read the header and check `package.json` against its integrity entry.
+2. Write a new `package.json` whose `main` is `cdp-boot.js` and which keeps the original as `cdpOriginalMain` (`lib/asar.js package`).
+3. Write `cdp-boot.js` with the profile's absolute data and config paths, the original main and the URL scheme baked in, plus a boot version (`ASAR_BOOT_VERSION`, `lib/asar.js boot`).
+4. Append both files after the existing data. No existing byte moves relative to the start of the data, so every old offset stays valid. Add `cdp-boot.js` and replace `package.json` in the header with offset (a string, like asar writes it), size and integrity (one block: both files are far below 4 MiB). `lib/asar.js add` edits the JSON.
+5. Re-serialise the pickle with the new sizes and padding, and write header, padding, the old data (`dd` with the old data start as block size), the boot file and `package.json`. Hashes come from `shasum -a 256`.
+6. Verify the new archive: the header parses, both new entries match their bytes and their integrity hashes, `main` is the boot file, and the original main still hashes to its own integrity entry at its shifted position.
+7. Put the new header hash into `Info.plist`. The copy is then re-signed inside-out like every build.
+
+**The boot file** is the app's main script and runs before any Claude code:
+
+- `app.setPath('userData', DATA)`, `sessionData` (when the Electron version knows it), `logs` → `DATA/Logs`, `crashDumps` → `DATA/Crashpad` (the Crashpad database follows), and `app.commandLine.appendSwitch('user-data-dir', DATA)`, which Chromium passes on to the helper processes. Electron supports `setPath('userData')` before `ready`: the browser process reads its local state and profile only after the main script ran. Claude's own main script uses the same call for its internal `CLAUDE_USER_DATA_DIR`.
+- `process.env.CLAUDE_CONFIG_DIR ??= CFG`, left out when the profile uses `~/.claude`. `LSEnvironment` still carries it too, which is what `ps -E` shows.
+- `app.setAsDefaultProtocolClient` and `removeAsDefaultProtocolClient` are wrapped: for `claude` and `claude-*` they return `true` without touching Launch Services, so the copy never takes `claude://` from regular Claude. `isDefaultProtocolClient` is left alone, so the copy knows it is not the handler and keeps Google sign-in in its in-app web authentication sheet. The copy keeps `CFBundleURLTypes`, so `link <slug>` can still send links to it.
+- The original main is loaded with `Module._load(path, null, true)`, the call Electron itself uses, so it becomes `require.main` and `process.mainModule`. Its `__dirname`, its relative requires and its compile cache (keyed on `.vite/build`) are unchanged; the boot file sits at the archive root.
+
+Claude records `localPairingDisabledReason = "userData relocated"` whenever the data folder is not the default one. That applied to launcher mode with `--user-data-dir` as well.
+
+**Why it is safe.** The integrity chain stays complete: Electron checks the header against the plist, which is updated, and every file, the two new ones included, against its block hashes. The original files are not changed, only moved together, and the original main is re-hashed after the patch. The copy is fully re-signed, so the signature seals the new plist and archive. A copy whose plist hash is left stale does not start: Electron aborts at launch with `FATAL ... Integrity check failed for asar archive entry '<header>'` (the negative test). Main Claude and its data are never touched.
+
+**Fallback.** `build` builds in launcher mode, with a WARN, when the source fails `asar_validate`: the integrity dictionary is not exactly one SHA256 entry for `Resources/app.asar`, the header format or hash does not match, `package.json` has an unknown integrity format or a hash mismatch, `main` is not a packed file, the archive already has `cdp-boot.js`, or the fuse wire is not version 1 with 9 fuses. `migrate-layout` refuses in that case (a profile in the old layout is moved to the hidden launcher layout instead). The checks are the manual Step 0 in [for-claude.md](for-claude.md).
+
+**Mode changes.** `build` targets self mode unless `--mode launcher` or `CLAUDE_PROFILES_APP_MODE=launcher` is given; `auto` keeps each profile's mode (`CLAUDE_PROFILES_KEEP_MODE=1`), except for the fallback. Going to self mode, the new app replaces the launcher at `/Applications/Claude <Name>.app` (both are this tool's bundles, checked by bundle ID), the hidden copy is unregistered and deleted, `APPS_DIR` is removed when empty, the old `… Launcher.app` of the old layout is removed, the profile is saved, and the Dock fix refreshes the pin: it still has the launcher's `bundle-identifier`, so it is replaced by a fresh tile for the same path. Going back to launcher mode moves the copy into `APPS_DIR` and builds the launcher at the old path. Both refuse while the copy runs and while a legacy LaunchAgent references it.
+
+**Checks.** `check` in self mode verifies the boot entry (present, integrity hash, wired as `main`, current version, baked data and config dirs), that the plist hash equals the recomputed header hash, open files of every process of the copy (`lsof`: files in the profile data dir, none in the main data dir with its Crashpad folder, `~/.claude` or `~/Library/Logs/Claude`), `CLAUDE_CONFIG_DIR` in the environment, the Launch Services PID and the `claude://` handler. `stale_reason` treats a missing or older boot entry, a plist hash mismatch and baked dirs that differ from the profile as stale.
+
+**Keychain prompt.** A copy that is not yet allowed to read "Claude Safe Storage" (ad-hoc signed, or before the first **Always Allow**) waits at startup on the Keychain prompt. While it is open the app does not handle Quit or `SIGTERM`. This is the same in both modes.
+
 ### Dock pins
+
+In self mode the profile's app itself belongs in the Dock. `dock <slug> fix` keeps that pin and repoints or drops pins of the hidden copy, of `… Launcher.app`, and a pin at the app's path whose `bundle-identifier` is still the launcher's (left over from launcher mode). `show --plain` reports `ok`, `not_pinned` or `old_launcher_pinned`. The rest of this section describes launcher mode.
 
 A pinned app copy opens bare (on the main profile) when it is closed, so only the launcher belongs in the Dock. `dock <slug> fix` reads `persistent-apps` from `defaults export com.apple.dock -` into a temp plist and compares the decoded `tile-data:file-data:_CFURLString` of each entry with the profile's paths:
 
@@ -144,38 +193,46 @@ The native app (`Sources/ClaudeProfiles`, SwiftUI, compiled by `scripts/build-ap
 
 - `CLIRunner` runs `bin/claude-profiles` (from `Contents/Resources/cli/`, or the path in `CLAUDE_PROFILES_CLI`) as a subprocess with `--yes`, streams the output to the log panel and returns the exit status and output.
 - `PlainParser` parses the `--plain` output of `list`, `scan`, `show`, `projects <slug> list`, `status`, `shell-init status` and `legacy-agents`. Unknown rows and extra columns are ignored, so a newer CLI keeps working. That output is the contract between the two halves.
-- The views (`SidebarView`, `ProfileDetailView`, `MainClaudeView`, `SettingsView` and the sheets) call `AppModel`, which calls the runner. **Move to new layout** appears on a profile whose `show --plain` reports `layout legacy`; it runs `migrate-layout <slug> --yes --plain`, and when the CLI exits 3 the `agent` rows on stdout (the `legacy-agents --plain` format) are shown with a button that opens Settings at the old LaunchAgents. Anything that needs the login password, such as `setup`, opens Terminal instead (fact 8); the app never sees the password.
+- The views (`SidebarView`, `ProfileDetailView`, `MainClaudeView`, `SettingsView` and the sheets) call `AppModel`, which calls the runner. The profile page reads the `mode` row: in self mode it shows "One app per profile; no launcher" in place of the launcher path and opens the app itself. **Move to new layout** appears on a profile whose `show --plain` reports `mode launcher` (or `layout legacy` from an older CLI); it runs `migrate-layout <slug> --yes --plain`, and when the CLI exits 3 the `agent` rows on stdout (the `legacy-agents --plain` format) are shown with a button that opens Settings at the old LaunchAgents. Anything that needs the login password, such as `setup`, opens Terminal instead (fact 8); the app never sees the password.
 - `ClaudeProfiles --self-test` runs the parser checks, then the CLI against a temporary `HOME` and `CLAUDE_PROFILES_HOME`: it creates a CLI-only profile, edits folders, recolors, copies a project, installs the CLI and removes the profile. It needs neither Claude.app nor a window. `scripts/build-app.sh` runs it on every build, so CI covers it on a runner without Claude.
 - `scripts/build-app.sh` copies `bin/`, `lib/` and the version into `Contents/Resources/cli/` with `ditto --noqtn` and signs the bundle ad-hoc (or with `SIGNING_IDENTITY`). `scripts/build-dmg.sh` stages the app with `cp -RX` and `xattr -cr`, verifies the signature in the stage, adds the Applications link, "READ ME FIRST.txt" and the README, and writes `SHA256SUMS.txt`.
 
 ## Build pipeline
 
 1. Take a lock (`mkdir` of a lock dir; stale after 30 minutes) so the LaunchAgent and a manual build never overlap.
-2. If the profile is in the old layout, run the layout migration (fact 12) first.
+2. Choose the mode: `--mode`, else `CLAUDE_PROFILES_APP_MODE`, else the current one under `auto`, else self. Self mode needs `asar_validate` to pass on the source app and no legacy LaunchAgent referencing the copy; otherwise the build warns and uses launcher mode. A launcher-mode build of a profile in the old layout runs the layout migration (fact 12) first.
 3. `ditto` the source app into a staging folder on the same volume as the destination (`APPS_DIR` is created when missing).
 4. Edit `Info.plist`: `CFBundleIdentifier`, `CFBundleDisplayName`, `LSEnvironment:CLAUDE_CONFIG_DIR`, delete `CFBundleIconName`.
 5. Tint the icon.
-6. Re-sign **inside-out**: every nested `.app`, `.framework`, `.xpc`, `.appex` and every Mach-O file, deepest paths first, then the main executable (with `--identifier <bundle-id>`), then the bundle. Each item keeps its own entitlements, minus the ones an ad-hoc or self-signed signature cannot carry (`com.apple.developer.*`, `com.apple.application-identifier`, `keychain-access-groups`, team identifiers), which would make macOS kill the process at launch. Entitlements such as the virtualization one stay.
-7. Verify the signature, re-check that the copy is not running, then swap the staged bundle into place (the old copy is kept until the move succeeded).
-8. Build the launcher at `/Applications/Claude <Name>.app` with `osacompile`, copy `lib/urlhandler.js` into its `Contents/Resources`, give it the copy's icon and register both with `lsregister -f`; `killall Dock` when run interactively.
+6. In self mode, patch `app.asar` and the `ElectronAsarIntegrity` hash (fact 13).
+7. Re-sign **inside-out**: every nested `.app`, `.framework`, `.xpc`, `.appex` and every Mach-O file, deepest paths first, then the main executable (with `--identifier <bundle-id>`), then the bundle. Each item keeps its own entitlements, minus the ones an ad-hoc or self-signed signature cannot carry (`com.apple.developer.*`, `com.apple.application-identifier`, `keychain-access-groups`, team identifiers), which would make macOS kill the process at launch. Entitlements such as the virtualization one stay.
+8. Verify the signature, re-check that the copy is not running, then swap the staged bundle into place (the old copy is kept until the move succeeded) and save the profile. After a mode change, remove the bundle the new one replaces (the hidden copy, an old launcher, or the self-mode app when going back to launcher mode).
+9. In launcher mode, build the launcher at `/Applications/Claude <Name>.app` with `osacompile`, copy `lib/urlhandler.js` into its `Contents/Resources`, give it the copy's icon and register both with `lsregister -f`. After a mode change run the Dock fix, otherwise restart the Dock, both only when run interactively.
 
-`recolor` is the fast path: it re-tints the `.icns` from the **source** app's icon (never from the already tinted one), re-signs only the outer bundle with the profile's resolved identity, rebuilds the launcher, refreshes Launch Services and restarts the Dock. It works while the copy is running; the Dock updates after the copy restarts.
+`recolor` is the fast path: it re-tints the `.icns` from the **source** app's icon (never from the already tinted one), re-signs only the outer bundle with the profile's resolved identity (`app.asar` is not touched), rebuilds the launcher in launcher mode, refreshes Launch Services and restarts the Dock. It works while the copy is running; the Dock updates after the copy restarts.
 
 ## The auto-rebuild agent
 
 `setup` writes one LaunchAgent (`io.github.claude-desktop-profiles.rebuild` by default) that runs `claude-profiles auto` on three triggers: a change of `/Applications/Claude.app` (`WatchPaths`), a 15-minute interval and load time. For every desktop profile, under one lock, `auto`:
 
-1. fixes bare launches;
+1. fixes bare launches (launcher mode only);
 2. restores `claude://` to regular Claude once the link window expired (also the backstop for copies started without the launcher, see fact 10);
-3. decides whether the copy is stale: missing, wrong bundle ID (the copy's own updater can overwrite it), version differs from the source, launcher missing (at `PROFILE_LAUNCHER`, whichever layout), `LSEnvironment` missing, or not signed by the profile's resolved identity (including a mixed signature);
+3. decides whether the copy is stale: missing, wrong bundle ID (the copy's own updater can overwrite it), version differs from the source, launcher missing (launcher mode, at `PROFILE_LAUNCHER`, whichever layout), boot entry missing, outdated or not matching the profile or the plist hash (self mode), `LSEnvironment` missing, or not signed by the profile's resolved identity (including a mixed signature);
 4. skips the source if its own signature is invalid (an update in progress);
-5. if the copy is running, notifies once per version and waits; otherwise rebuilds.
+5. if the copy is running, notifies once per version and waits; otherwise rebuilds it in its current mode (`CLAUDE_PROFILES_KEEP_MODE=1`), so the agent never moves a profile to self mode on its own.
 
 ## Dead ends
+
+The history of the desktop layout, in order: a shell wrapper as the executable (broke window managers), `CLAUDE_USER_DATA_DIR` in the environment (stripped), a launcher next to the copy (two search entries), the copy hidden in `APPS_DIR` behind the launcher (one search entry, but two Dock icons and bare launches through every other path), and self mode (one app, fact 13).
 
 - **Shell wrapper as executable**: PID 0 registration, window managers lose the app (fact 1).
 - **`CLAUDE_USER_DATA_DIR` in `LSEnvironment` or `open --env`**: stripped by the app at startup (fact 2).
 - **Only `CLAUDE_CONFIG_DIR` in `LSEnvironment`**: sets the CLI/Code config but leaves the desktop data folder shared.
+- **Launcher plus hidden copy as the only design**: one search entry, but the Dock shows the pinned launcher and the running copy as two icons, and a pin of the copy, a `claude://` link or login restore starts the copy bare on the main data folder until `auto` repairs it (facts 5 and 12). It remains as the fallback.
+- **Injecting the data folder with `NODE_OPTIONS=--require`, `ELECTRON_RUN_AS_NODE` or `--inspect`**: the fuses disable all three.
+- **An unpacked `app` folder or a loose JavaScript file next to `app.asar`**: `OnlyLoadAppFromAsar` ignores it.
+- **Editing `app.asar` without updating `ElectronAsarIntegrity`, or editing a file in place**: Electron aborts at startup or when it reads the file. Appending new entries and updating the header hash keeps the chain valid (fact 13).
+- **Hardcoding `.vite/build/index.pre.js` as the original main**: it changes between Claude builds; it is read from `package.json` in the archive.
 - **Ad-hoc signing for everything**: works, but re-prompts for Keychain and TCC after every rebuild (fact 6).
 - **Signing the bundle only (`--deep`)**: nested helpers keep the original signature and the launch fails or loses entitlements; sign inside-out.
 - **Keeping all entitlements**: restricted entitlements without a matching provisioning profile get the process killed at launch.

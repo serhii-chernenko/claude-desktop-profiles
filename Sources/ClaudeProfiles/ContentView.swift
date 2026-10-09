@@ -139,7 +139,7 @@ struct EmptyProfilesView: View {
                 }
                 HStack(alignment: .top, spacing: 14) {
                     FeatureTile(systemImage: "app.badge", title: "Own desktop app",
-                                text: "A tinted copy of Claude with its own Dock icon and launcher.")
+                                text: "A tinted copy of Claude with its own Dock icon, one app per profile.")
                     FeatureTile(systemImage: "person.crop.circle.badge.checkmark", title: "Own sign-in",
                                 text: "Separate account, chats and settings. Your main Claude is untouched.")
                     FeatureTile(systemImage: "terminal", title: "Own Claude Code history",
