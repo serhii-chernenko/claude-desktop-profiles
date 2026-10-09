@@ -4,41 +4,38 @@ Run several Claude accounts side by side on macOS, each with its own login, its 
 
 - **Claude desktop**: every profile is a copy of `/Applications/Claude.app` with its own bundle ID, its own data folder and a tinted icon. A small launcher app starts the copy on the right data folder.
 - **Claude Code (CLI)**: every profile has its own `CLAUDE_CONFIG_DIR`. A shell hook picks the profile from the folder you are in.
-- **Zero dependencies**: only tools that ship with macOS (zsh, `osascript`, PlistBuddy, `codesign`, `iconutil`, `ditto`, `security`, `launchctl`). No Homebrew packages, no Python, no Swift.
+- **Native app, no dependencies**: Claude Profiles is a SwiftUI window over a zsh command-line tool. It needs only what ships with macOS (zsh, `osascript`, PlistBuddy, `codesign`, `iconutil`, `ditto`, `security`, `launchctl`). No Homebrew packages, no Python.
 
-> Screenshot placeholder: the "Claude Profiles" menu and two tinted Claude icons in the Dock.
+Requires macOS 13 or newer. Desktop profiles also need an installed `/Applications/Claude.app`; Claude Code (CLI) profiles work without it.
 
-Requires macOS 13 or newer and an installed `/Applications/Claude.app`. The released app uses the standard applet icon; a local build (`zsh scripts/build-app.sh`) tints its icon from your Claude.app.
+## Three ways to use it
 
-## Two ways to use it
+1. **The app** (recommended): a window to create, recolor, check and remove profiles.
+2. **The command-line tool**: the same operations as `claude-profiles`, for scripts and power users.
+3. **Claude Code**: ask it in this repository and it drives the command-line tool for you.
 
-### Path A: the app or the command line
+## Path 1: the app
 
-1. Download `Claude-Profiles-<version>.dmg` from the [Releases](https://github.com/serhii-chernenko/claude-desktop-profiles/releases) page and drag **Claude Profiles** to Applications. Or clone this repository and run `zsh install.sh` to get only the CLI.
-2. Open **Claude Profiles** and choose **Create profile** (or run `claude-profiles new`).
-3. Pin the new **Claude `<Name>` Launcher** to the Dock. Always start the profile through its launcher.
-4. Run **Set up auto-rebuild & stable signing** once (see [Updates and auto-rebuild](#updates-and-auto-rebuild)).
+### Install
 
-### Path B: ask Claude Code
+1. Download `Claude-Profiles-<version>.dmg` from the [Releases](https://github.com/serhii-chernenko/claude-desktop-profiles/releases) page and drag **Claude Profiles** to **Applications**.
+2. Open it from Applications and approve it once with **Open Anyway** (see [First launch](#first-launch-gatekeeper)).
+3. Use the window. Pin the new **Claude `<Name>` Launcher** to the Dock and always start a profile through its launcher.
 
-1. Clone this repository and open Claude Code in it:
+### The window
 
-   ```sh
-   git clone https://github.com/serhii-chernenko/claude-desktop-profiles.git
-   cd claude-desktop-profiles
-   claude
-   ```
+- **Sidebar.** Your profiles, then **Main Claude** (your regular app and `~/.claude`, read-only: profiles never change it) and **Setup & Settings**. **New Profile** is at the bottom (or press ⌘N).
+- **Create a profile.** Give it a name, pick an **icon color** with the color picker (the tint is applied to the copy's Dock icon and its launcher), and choose what it is for: the desktop app, Claude Code, or both. You can reuse an existing data folder (which keeps its sign-in and chats) or config folder, bring existing projects along (share, move or copy, see below) and list folders that select the profile automatically.
+- **A profile page** has the color picker (recolor takes seconds, no rebuild), **Open**, **Rebuild**, **Check**, **Link Sign-in** / **Back to Main** (sends `claude://` sign-in links to the profile for a while, then back), **Copy Command** (the `claude-<slug>` command), **Remove** (keeps data and history unless you tick the delete boxes), the folders that auto-select the profile, and its Claude Code projects.
+- **Adopt banner.** If the app finds a copy you built by hand earlier (a `Claude <Name>.app` with its own data folder), it shows a banner "Found existing copy". **Adopt** manages it here without rebuilding or changing it; **Not Now** hides the banner.
+- **Project migration.** In a profile, **Add Projects** lists Claude Code projects that have history in other config folders. For the ones you tick, choose **Share** (a symlink: both config folders see the same history from now on), **Move** (the history leaves the old config folder) or **Copy** (an independent copy). You can also add each project folder to the profile's folders so `claude` picks the profile there. Quit Claude Code sessions in those projects first.
+- **Setup & Settings.**
+  - **Command-line tool**: **Install** (or **Update**) copies the tool bundled in the app to `~/.local/share/claude-profiles` and links `~/.local/bin/claude-profiles`, so `claude-profiles` works in Terminal.
+  - **Shell integration**: a toggle that adds (or removes) one marked line in `~/.zshrc` (or `~/.bashrc`) that defines `claude`, `claude-default` and `claude-<profile>`. It warns about other definitions of `claude` that would override it.
+  - **Updates and signing**: the status of the signing identity, the auto-rebuild agent and Claude.app. **Set Up** installs the command-line tool and opens Terminal once to run `setup`; you type your login password there, and the app never sees it.
+  - **Old LaunchAgents**: lists agents from earlier hand-made setups that also watch Claude.app. **Disable** unloads one and renames its file to `.disabled`; nothing is deleted.
 
-2. Say: "Create a profile called Work."
-3. Claude Code follows [CLAUDE.md](CLAUDE.md). It runs `bin/claude-profiles ... --yes`, and if the utility is unavailable it follows [docs/for-claude.md](docs/for-claude.md) step by step. It tells you which steps only you can do (one terminal command, one Keychain click, pinning to the Dock).
-
-## Install
-
-| Method | Command |
-| --- | --- |
-| App (GUI + bundled CLI) | Download the DMG, drag **Claude Profiles** to Applications |
-| CLI only | `zsh install.sh` (links `bin/claude-profiles` into `~/.local/bin`; override with `PREFIX=/some/dir`) |
-| CLI from the app | In **Claude Profiles**, choose **Install command-line tool** (copies the tool to `~/.local/share/claude-profiles` and links `~/.local/bin/claude-profiles`; run it again after updating the app) |
+Every button runs a `claude-profiles` command: see [What the app does](#what-the-app-does) and the [command reference](#commands). **Show Log** displays the output.
 
 ### First launch (Gatekeeper)
 
@@ -52,17 +49,33 @@ On macOS 15 and later, right-click → **Open** no longer bypasses this check. A
 
 Verify the download against `SHA256SUMS.txt` from the same release: `shasum -a 256 -c SHA256SUMS.txt`.
 
-The Claude copies and launchers that the tool builds on your Mac are not downloaded, so they are not quarantined and open without this step.
+The Claude copies and launchers that the tool builds on your Mac are not downloaded, so they are not quarantined and open without this step. The command-line tool that the app installs is copied without the quarantine flag as well.
 
-## Quick start
+## Path 2: the command-line tool
+
+For power users and scripts. Get it from the app (**Setup & Settings → Command-line tool → Install**), or clone this repository and run `zsh install.sh` (links `bin/claude-profiles` into `~/.local/bin`; override with `PREFIX=/some/dir`).
 
 ```sh
 claude-profiles new --name "Work" --color '#3b82f6' --yes
 claude-profiles list
 claude-profiles check work
+claude-profiles shell-init install
 ```
 
-The wizard (`claude-profiles new` without flags) asks for the name, the color, and whether the profile is for the desktop app, the CLI or both. It also scans for existing Claude data and Claude Code history and lets you adopt them or link individual projects.
+The wizard (`claude-profiles new` without flags) asks for the name, the color, and whether the profile is for the desktop app, the CLI or both. It also scans for existing Claude data and Claude Code history and lets you adopt them or link individual projects. Then pin the new launcher to the Dock and run `claude-profiles setup` once in Terminal (see [Updates and auto-rebuild](#updates-and-auto-rebuild)).
+
+## Path 3: ask Claude Code
+
+1. Clone this repository and open Claude Code in it:
+
+   ```sh
+   git clone https://github.com/serhii-chernenko/claude-desktop-profiles.git
+   cd claude-desktop-profiles
+   claude
+   ```
+
+2. Say: "Create a profile called Work."
+3. Claude Code follows [CLAUDE.md](CLAUDE.md). It runs `bin/claude-profiles ... --yes`, and if the utility is unavailable it follows [docs/for-claude.md](docs/for-claude.md) step by step. It never runs `setup` for you: that always happens in your own Terminal, because it needs your password. It also tells you the other steps only you can do (one Keychain click, pinning to the Dock).
 
 ## Commands
 
@@ -73,33 +86,46 @@ Every interactive prompt has a flag equivalent. `--yes` means "never prompt" and
 | `new [--name N] [--slug s] [--color '#hex' \| --hue DEG \| --pick-color] [--desktop\|--no-desktop] [--cli\|--no-cli] [--data-dir P] [--config-dir P] [--dir PATH]... [--link PROJECT_CWD]... [--link-mode symlink\|move\|copy] [--no-build] [--yes] [--plain]` | Create a profile and build its app copy and launcher. `--plain` adds a final machine line `created`, the slug and the launcher path (or `-`), tab-separated. `--no-desktop` needs neither Claude.app nor a color. If the profile already exists, run `build <slug>` to retry the build. `--hue DEG` is the target hue of the icon in degrees (the tool computes the shift from the source icon), not a rotation. `--no-cli` makes a desktop-only profile (no `claude-<slug>` function, no folder rules); `--no-desktop` makes a CLI-only profile |
 | `list [--plain]` | List profiles (the implicit `default` profile is included). `--plain` prints `slug`, `name`, `color`, `desktop` (`1` or `0`), `app`, `config_dir`, `data_dir`, tab-separated. For CLI-only profiles (`desktop` is `0`) `app` and `data_dir` are `-`; `color` is `-` when unset; the `default` row has color `-` |
 | `scan [--plain]` | Find existing config dirs, data dirs and projects with session history. `--plain` rows are `config`, `data` and `project` lines; project dirs without a `.jsonl` transcript are left out, and config dirs without `projects/`, `.claude.json` or `settings.json` are not listed (except the main one) |
-| `show <slug>` | Print one profile's settings |
+| `show <slug> [--plain]` | Print one profile's settings. `--plain` prints `key<TAB>value` lines, then one `dir` line per folder |
+| `projects <slug> list [--plain]` | Claude Code session history stored in the profile's config dir, by project folder. `--plain` rows: `project`, working directory, sessions, last used, `symlink` or `dir` |
+| `projects <slug> add [--mode symlink\|move\|copy] [--no-dir] [--yes] CWD...` | Bring the history of project folders into an **existing** profile (the same operation as `--link` on `new`). `symlink` shares it, `move` reassigns it, `copy` duplicates it. By default each folder is also added to the profile's folders; `--no-dir` skips that. Quit running Claude Code sessions in those projects first |
+| `status [--plain]` | Command-line tool install, signing identity, auto-rebuild agent, source app and the `claude://` handler, with the settings folder |
+| `install-cli [--from DIR] [--prefix DIR] [--share-dir DIR] [--bin-dir DIR]` | Copy the tool (without the quarantine flag) to `~/.local/share/claude-profiles` and link `~/.local/bin/claude-profiles` |
+| `legacy-agents [--plain]` | List other LaunchAgents that watch Claude.app or a profile copy (earlier hand-made setups) |
+| `legacy-agents disable LABEL [--yes]` | Unload one of them and rename its plist to `.disabled`; nothing is deleted |
 | `build <slug>\|--all` | Rebuild the app copy and launcher from the current Claude.app |
 | `launcher <slug>` | Rebuild only the launcher |
 | `recolor <slug> [--color '#hex' \| --hue DEG \| --pick-color]` | Change the icon color in seconds, without a full rebuild (desktop profiles only; `--hue DEG` is the target hue) |
 | `check <slug>` | Verify profile isolation, signature, agent and version |
 | `link <slug>\|main` | Send `claude://` links (sign-in) to a profile copy for `LINK_TTL` (15 minutes by default), or back to regular Claude (desktop profiles only) |
 | `remove <slug> [--delete-data] [--delete-config] [--yes]` | Remove the app copy, launcher and profile entry; data and config are kept unless asked. If `claude://` points at the removed copy it is restored to regular Claude first |
-| `adopt --slug s --name N --app PATH [--launcher PATH] [--data-dir P] [--config-dir P] [--identity NAME] [--color '#hex'] [--dir PATH]...` | Register a hand-made install without rebuilding. Without `--data-dir` the default data dir must already exist |
+| `adopt --slug s --name N --app PATH [--launcher PATH] [--data-dir P] [--config-dir P] [--identity NAME] [--color '#hex'] [--dir PATH]...` | Register a hand-made install without rebuilding. Without `--data-dir` the default data dir must already exist. `scan` lists hand-made copies it finds as `candidate` rows, ready to adopt |
 | `setup [--identity NAME]` | One-time, terminal only: signing identity and the auto-rebuild LaunchAgent |
 | `auto [--dry-run]` | What the LaunchAgent runs: rebuild stale profiles, fix wrong-profile launches |
 | `uninstall-agent` | Remove the LaunchAgent |
 | `shell-init zsh\|bash` | Print the shell hook: `claude`, `claude-default`, `claude-<slug>`, `claude-profile-env` (see [CLI profiles](#cli-profiles-and-shell-init)) |
+| `shell-init install [zsh\|bash] [--rc FILE]` | Add the `eval "$(claude-profiles shell-init zsh)"` line to `~/.zshrc` or `~/.bashrc` as one marked, idempotent block (a backup is kept) |
+| `shell-init uninstall [zsh\|bash] [--rc FILE]` | Remove that block |
+| `shell-init status [zsh\|bash] [--rc FILE] [--plain]` | Whether the block is installed (`installed` 0 or 1), and any other definitions of `claude` that would override it |
 | `dirs <slug> add\|rm PATH` / `dirs <slug> list` | Manage folders that auto-select a CLI profile |
 | `version`, `help` | Version and usage |
 
 ### What the app does
 
-| Menu entry | CLI equivalent |
+| In the app | CLI equivalent |
 | --- | --- |
-| Create profile | `new ... --yes` |
-| Change color (desktop profiles) | `recolor <slug> --color '#hex'` |
+| New Profile | `new ... --yes` |
+| Icon color (desktop profiles) | `recolor <slug> --color '#hex'` |
 | Rebuild (desktop profiles) | `build <slug>` or `build --all` |
 | Check | `check <slug>` |
-| Link sign-in (claude://, desktop profiles) | `link <slug>` or `link main` |
+| Link Sign-in / Back to Main (desktop profiles) | `link <slug>` or `link main` |
 | Remove | `remove <slug> [--delete-data] [--delete-config]` |
-| Set up auto-rebuild & stable signing | installs the command-line tool, then runs `setup` from `~/.local/share/claude-profiles` in Terminal (the LaunchAgent points there, not into the app) |
-| Install command-line tool | copy into `~/.local/share/claude-profiles` (without the download quarantine flag) + symlink in `~/.local/bin` |
+| Adopt banner | `scan --plain` (the `candidate` rows), then `adopt ...` |
+| Add Projects | `projects <slug> add --mode symlink\|move\|copy CWD...`; the list comes from `scan --plain` and `projects <slug> list --plain` |
+| Settings: Command-line tool | `install-cli` and `status` |
+| Settings: Shell integration | `shell-init install`, `shell-init uninstall` and `shell-init status` |
+| Settings: Set Up | `install-cli`, then Terminal opens and runs `setup` from `~/.local/share/claude-profiles` (the LaunchAgent points there, not into the app) |
+| Settings: Old LaunchAgents | `legacy-agents` and `legacy-agents disable LABEL` |
 
 ## Updates and auto-rebuild
 
@@ -119,7 +145,7 @@ Ad-hoc signatures change on every rebuild, so macOS would ask again for Keychain
 
 ## CLI profiles and shell-init
 
-Add one line to `~/.zshrc` (or `~/.bashrc`):
+Turn on **Shell integration** in the app, or run `claude-profiles shell-init install` (it adds one marked block to `~/.zshrc` or `~/.bashrc`; `shell-init uninstall` removes it). By hand, add this line to your shell startup file:
 
 ```sh
 eval "$(claude-profiles shell-init zsh)"
@@ -161,6 +187,14 @@ The `claude-profiles.bak` backups: when a project is linked, edited `.claude.jso
 
 **The Code tab shows no sessions in the copy.** The desktop app's session index is bound to the account and the data folder. Your transcripts are in the config dir and remain available to the CLI (`claude --resume`). See [docs/how-it-works.md](docs/how-it-works.md).
 
+**macOS says Claude Profiles "cannot be opened" or "is damaged".** The app is not notarized, so the first launch needs **Open Anyway** (see [First launch](#first-launch-gatekeeper)). Open it from Applications, not from the disk image.
+
+**Set Up opens Terminal and `setup` stops with "disk image or translocated app".** Move **Claude Profiles.app** to Applications, open it from there and press **Set Up** again. It installs the command-line tool first, and `setup` runs from that installed copy.
+
+**Shell integration is on but `claude` does not pick the profile.** Another definition of `claude` (an alias or function in a shell startup file) overrides it. The Settings tab, or `claude-profiles shell-init status`, shows where; remove or rename it, then open a new Terminal window.
+
+**Old hand-made LaunchAgents rebuild or quit my copies.** List them with `claude-profiles legacy-agents` (or in Settings) and disable them one by one with `legacy-agents disable LABEL`.
+
 **`check` reports FAIL.** The message names the exact fix (usually: quit the copy and use the launcher, or run `link main`).
 
 More background on every design decision is in [docs/how-it-works.md](docs/how-it-works.md).
@@ -171,17 +205,19 @@ More background on every design decision is in [docs/how-it-works.md](docs/how-i
 claude-profiles remove <slug>                              # one profile; keeps data and config
 claude-profiles remove <slug> --delete-data --delete-config   # also delete login and history
 claude-profiles uninstall-agent                            # remove the LaunchAgent
+claude-profiles shell-init uninstall                       # remove the shell hook block
 rm -f ~/.local/bin/claude-profiles                         # remove the CLI link
+rm -rf ~/.local/share/claude-profiles                      # remove the installed CLI copy
 rm -rf ~/.config/claude-profiles                           # remove settings (optional)
 ```
 
-Then delete `Claude Profiles.app` from Applications and remove the `eval "$(claude-profiles shell-init zsh)"` line from your shell config. The signing identity can be deleted in Keychain Access (search for "Claude Profiles Signing").
+Then delete `Claude Profiles.app` from Applications. The signing identity can be deleted in Keychain Access (search for "Claude Profiles Signing").
 
 ## Security notes
 
 - **Self-signed identity.** `setup` creates a self-signed code-signing certificate in your login keychain, trusts it for code signing (this is what asks for your password) and adds `codesign` to the private key's partition list so signing runs without prompts. Only this identity name is trusted, nothing else is added to the keychain. Identity names may use only letters, digits, space, dot, underscore and dash.
 - **Source Team ID check.** Before `build` or `auto` copies `/Applications/Claude.app`, the tool verifies that it is signed by Apple Team ID `Q6L2SF6YDW` (`SOURCE_TEAM_ID` in `config.env`; an empty value disables the check). `build` stops with an error and `auto` logs the refusal and skips the copy.
-- **LaunchAgent path.** The LaunchAgent runs `claude-profiles` from the path it was installed from. `setup` refuses to install it from a disk image, a translocated app, or any location that is not owned by you or is writable by group or others. Install the CLI or the app in a user-owned location (for example `~/.local/bin` or `/Applications` installed by you), then run `setup`.
+- **LaunchAgent path.** The LaunchAgent runs `claude-profiles` from the path it was installed from. `setup` refuses to install it from a disk image, a translocated app, or any location that is not owned by you or is writable by group or others. Run `install-cli` first (the app's **Set Up** button does it for you), so the tool lives in `~/.local/share/claude-profiles`: a user-owned location without the quarantine flag. Then run `setup` from there.
 - **No hardened runtime.** Profile copies are re-signed without the hardened runtime, like the hand-made reference setup, and keep the sanitized entitlements of the original. They are as trusted as the Claude.app they were copied from.
 - **Deleting data.** `remove --delete-data` and `--delete-config` only delete folders under your home whose name starts with `.claude` or `Claude-`, and never `~/.claude`, the main Claude data folder or the source app.
 

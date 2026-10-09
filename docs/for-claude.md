@@ -24,6 +24,21 @@ All commands are zsh. Replace the placeholders in the variables block once, then
 
 **Never touch:** `/Applications/Claude.app` (the source; it is only read), the Keychain, LaunchAgents, and any profile you were not asked to change.
 
+## Newer CLI commands (use these before the manual steps)
+
+These all accept `--yes` and the read-only ones accept `--plain`. Run `bin/claude-profiles help` for the exact flags.
+
+| Need | Command |
+| --- | --- |
+| Inspect state | `status --plain` (CLI install, signing identity, agent, source app, `claude://` handler), `show <slug> --plain`, `scan --plain` |
+| Move session history into an **existing** profile | `projects <slug> list --plain`, then `projects <slug> add --mode symlink\|move\|copy [--no-dir] --yes CWD...` (ask first; `move` and `copy` change session history) |
+| Register a hand-made copy | `scan --plain` prints `candidate` rows (app, launcher, bundle ID, data dir, name); pass them to `adopt --slug s --name N --app PATH [--launcher PATH] [--data-dir P] [--config-dir P]` |
+| Shell hook in `~/.zshrc` | `shell-init status --plain`, then `shell-init install` or `shell-init uninstall` (an idempotent marked block; ask first, because it edits a shell startup file) |
+| Old hand-made LaunchAgents | `legacy-agents --plain` to list, `legacy-agents disable LABEL --yes` to unload and rename one (ask first) |
+| CLI on the PATH | `install-cli` copies the tool to `~/.local/share/claude-profiles` and links `~/.local/bin/claude-profiles` |
+
+`setup` is never in this list: it is always run by the human in Terminal, because it needs their login password. The native app does the same: its **Set Up** button opens Terminal for the user and never handles the password.
+
 ## 0. Variables
 
 ```zsh

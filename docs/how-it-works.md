@@ -81,6 +81,22 @@ The launcher fixes it after a fresh launch (not in the "already running" branch)
 
 `remove` restores the handler to regular Claude before it deletes the app when the handler points at the removed copy. `CLAUDE_PROFILES_NO_URL_SET` turns the CLI's handler changes into a warning; the launcher's step is not affected, so test the launcher by inspecting its script (`osadecompile`) and not by launching it.
 
+### 11. Quarantine and where the CLI runs from
+
+Everything inside a downloaded app carries the `com.apple.quarantine` attribute, and Gatekeeper may run a quarantined app from a read-only, randomized "translocated" path (`/private/var/folders/.../AppTranslocation/...`). A LaunchAgent that pointed inside the app would break when that path changes or the app moves, so `setup` refuses to install it from a disk image or a translocated app, and from any path that is not owned by you or is writable by group or others.
+
+`install-cli` is the way out. It copies `bin/`, `lib/` and `VERSION` out of the app with `ditto --noqtn` (no quarantine flag) into `~/.local/share/claude-profiles`, applies `chmod -R go-w`, swaps the new copy into place and links `~/.local/bin/claude-profiles` to it. The copy is a stable, user-owned location that has never been quarantined, which is exactly what the LaunchAgent and the Terminal need. The app starts the CLI as `/bin/zsh -f <script>`, so it never depends on the script's executable bit or on the quarantine state. Everyday commands run from the copy inside the app; the **Set Up** button first runs `install-cli` and then opens Terminal on the installed copy. After installing a new version of the app, press **Update** in Settings (or run `install-cli`) so the installed copy matches.
+
+## App architecture
+
+The native app (`Sources/ClaudeProfiles`, SwiftUI, compiled by `scripts/build-app.sh` into a universal binary) is a thin shell over the CLI. It holds no profile logic of its own:
+
+- `CLIRunner` runs `bin/claude-profiles` (from `Contents/Resources/cli/`, or the path in `CLAUDE_PROFILES_CLI`) as a subprocess with `--yes`, streams the output to the log panel and returns the exit status and output.
+- `PlainParser` parses the `--plain` output of `list`, `scan`, `show`, `projects <slug> list`, `status`, `shell-init status` and `legacy-agents`. Unknown rows and extra columns are ignored, so a newer CLI keeps working. That output is the contract between the two halves.
+- The views (`SidebarView`, `ProfileDetailView`, `MainClaudeView`, `SettingsView` and the sheets) call `AppModel`, which calls the runner. Anything that needs the login password, such as `setup`, opens Terminal instead (fact 8); the app never sees the password.
+- `ClaudeProfiles --self-test` runs the parser checks, then the CLI against a temporary `HOME` and `CLAUDE_PROFILES_HOME`: it creates a CLI-only profile, edits folders, recolors, copies a project, installs the CLI and removes the profile. It needs neither Claude.app nor a window. `scripts/build-app.sh` runs it on every build, so CI covers it on a runner without Claude.
+- `scripts/build-app.sh` copies `bin/`, `lib/` and the version into `Contents/Resources/cli/` with `ditto --noqtn` and signs the bundle ad-hoc (or with `SIGNING_IDENTITY`). `scripts/build-dmg.sh` stages the app with `cp -RX` and `xattr -cr`, verifies the signature in the stage, adds the Applications link, "READ ME FIRST.txt" and the README, and writes `SHA256SUMS.txt`.
+
 ## Build pipeline
 
 1. Take a lock (`mkdir` of a lock dir; stale after 30 minutes) so the LaunchAgent and a manual build never overlap.

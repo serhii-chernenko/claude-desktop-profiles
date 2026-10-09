@@ -22,10 +22,8 @@ jobs:
             echo "ok $script"
           done
 
-      - name: Compile the GUI applet
-        run: osacompile -o "$RUNNER_TEMP/Claude Profiles.app" "gui/Claude Profiles.applescript"
+      - name: Build the app (runs the self-test, which does not need Claude.app)
+        run: zsh scripts/build-app.sh
 
-      - name: Build the app and DMG
-        run: |
-          zsh scripts/build-app.sh
-          zsh scripts/build-dmg.sh
+      - name: Build the DMG
+        run: SKIP_APP_BUILD=1 zsh scripts/build-dmg.sh

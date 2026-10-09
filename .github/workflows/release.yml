@@ -13,11 +13,22 @@ jobs:
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
-      - name: Build app and DMG
+      - name: Syntax-check zsh scripts
+        run: |
+          for script in bin/claude-profiles scripts/*.sh install.sh; do
+            [ -f "$script" ] || continue
+            zsh -n "$script"
+          done
+
+      - name: Build the app (runs the self-test, which does not need Claude.app)
         run: |
           export VERSION="${GITHUB_REF_NAME#v}"
           zsh scripts/build-app.sh
-          zsh scripts/build-dmg.sh
+
+      - name: Build the DMG
+        run: |
+          export VERSION="${GITHUB_REF_NAME#v}"
+          SKIP_APP_BUILD=1 zsh scripts/build-dmg.sh
 
       - name: Create the release or update its assets
         env:

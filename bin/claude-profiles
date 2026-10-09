@@ -8,8 +8,8 @@
 #       [--cli|--no-cli] [--data-dir P] [--config-dir P] [--dir PATH]... [--link PROJECT_CWD]...
 #       [--link-mode symlink|move|copy] [--no-build] [--yes] [--plain]
 #   list [--plain]                      profiles (slug name color desktop app config_dir data_dir)
-#   scan [--plain]                      existing config dirs, data dirs and projects (read-only)
-#   show <slug>                         profile details
+#   scan [--plain]                      config dirs, data dirs, projects and existing copies to adopt (read-only)
+#   show <slug> [--plain]               profile details (--plain: key<TAB>value lines, then one dir line per folder)
 #   build <slug>|--all                  (re)build the desktop copy and its launcher
 #   launcher <slug>                     rebuild only the launcher
 #   recolor <slug> [--color '#hex'|--hue DEG|--pick-color]
@@ -18,15 +18,27 @@
 #   remove <slug> [--delete-data] [--delete-config] [--yes]
 #   adopt --slug s --name N --app PATH [--launcher PATH] [--data-dir P] [--config-dir P]
 #         [--identity NAME] [--color '#hex'] [--dir PATH]...
+#   projects <slug> list [--plain]      session history inside the profile's config dir
+#   projects <slug> add [--mode symlink|move|copy] [--no-dir] [--yes] CWD...
+#                                       bring Claude Code history for CWD into an existing profile
 #   setup [--identity NAME]             run once in Terminal: signing identity + auto-rebuild agent
+#   status [--plain]                    CLI install, signing identity, agent, source app, claude:// handler
+#   install-cli [--from DIR] [--prefix DIR] [--share-dir DIR] [--bin-dir DIR]
+#                                       copy this CLI to ~/.local/share/claude-profiles and link ~/.local/bin
+#   legacy-agents [--plain]             other LaunchAgents that watch Claude.app or a profile copy
+#   legacy-agents disable LABEL [--yes] unload one of them and rename its plist to .disabled
 #   auto [--dry-run]                    what the LaunchAgent runs
 #   uninstall-agent                     remove the LaunchAgent
 #   shell-init zsh|bash                 eval "$(claude-profiles shell-init zsh)"
+#   shell-init install [zsh|bash] [--rc FILE]    add the eval line to ~/.zshrc or ~/.bashrc (idempotent block)
+#   shell-init uninstall [zsh|bash] [--rc FILE]  remove that block
+#   shell-init status [zsh|bash] [--rc FILE] [--plain]   installed 0|1 plus conflicting claude definitions
 #   dirs <slug> add|rm PATH | dirs <slug> list
 #   version | help
 #
 # --yes never prompts. --plain prints tab-separated output without colors.
 # Exit codes: 0 ok, 1 error, 2 usage. Config: $CLAUDE_PROFILES_HOME (~/.config/claude-profiles).
+# Test overrides: CLAUDE_PROFILES_AGENTS_DIR (LaunchAgents dir), CLAUDE_PROFILES_APPS_DIR (apps dir scanned for copies).
 #
 setopt extended_glob
 set -euo pipefail
@@ -54,6 +66,12 @@ LOG_FILE=${CLAUDE_PROFILES_LOG:-$HOME/Library/Logs/claude-profiles.log}
 PB=/usr/libexec/PlistBuddy
 LSREG=/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister
 KEYCHAIN=$HOME/Library/Keychains/login.keychain-db
+AGENTS_DIR=${CLAUDE_PROFILES_AGENTS_DIR:-$HOME/Library/LaunchAgents}
+APPS_DIR=${CLAUDE_PROFILES_APPS_DIR:-/Applications}
+DEFAULT_SHARE_DIR=$HOME/.local/share/claude-profiles
+DEFAULT_BIN_DIR=$HOME/.local/bin
+RC_BEGIN='# >>> claude-profiles >>>'
+RC_END='# <<< claude-profiles <<<'
 MAIN_CONFIG_DIR=$HOME/.claude
 MAIN_DATA_DIR="$HOME/Library/Application Support/Claude"
 DEFAULT_IDENTITY="Claude Profiles Signing"
@@ -184,7 +202,7 @@ load_config() {
   [[ $LINK_TTL == <-> ]] || LINK_TTL=900
   valid_identity "$SIGN_IDENTITY" || die "SIGN_IDENTITY in $CONFIG_FILE must be - or use only letters, digits, space, dot, underscore and dash."
   [[ -z $SOURCE_TEAM_ID || $SOURCE_TEAM_ID =~ '^[A-Z0-9]{10}$' ]] || die "SOURCE_TEAM_ID in $CONFIG_FILE must be empty or a 10-character Team ID."
-  AGENT_PLIST=$HOME/Library/LaunchAgents/$AGENT_LABEL.plist
+  AGENT_PLIST=$AGENTS_DIR/$AGENT_LABEL.plist
 }
 
 save_config() {
@@ -301,6 +319,7 @@ claude_json_for() {
 }
 
 plist_get() {
+  [[ -f $1/Contents/Info.plist ]] || return 0
   $PB -c "Print :$2" "$1/Contents/Info.plist" 2>/dev/null || true
 }
 
@@ -313,8 +332,8 @@ src_id() {
 }
 
 url_scheme() {
-  local s
-  s=$($PB -c "Print :CFBundleURLTypes:0:CFBundleURLSchemes:0" "$SOURCE_APP/Contents/Info.plist" 2>/dev/null || true)
+  local s plist=$SOURCE_APP/Contents/Info.plist
+  [[ -f $plist ]] && s=$($PB -c "Print :CFBundleURLTypes:0:CFBundleURLSchemes:0" "$plist" 2>/dev/null || true)
   print -r -- "${s:-claude}"
 }
 
@@ -520,13 +539,19 @@ source_icns() {
     found=( "$SOURCE_APP"/Contents/Resources/*.icns(N) )
     f=${found[1]:-}
   fi
-  [[ -f $f ]] || die "No .icns icon found in $SOURCE_APP"
+  [[ -f $f ]] || return 1
   print -r -- "$f"
 }
 
 resolve_color() {
   local icns out
-  icns=$(source_icns)
+  if ! icns=$(source_icns); then
+    [[ $1 == '#'* ]] || die "No .icns icon found in $SOURCE_APP; a hue needs the source icon (give the color as #hex instead)."
+    PROFILE_HUE=0
+    PROFILE_SAT=1
+    PROFILE_COLOR=$1
+    return 0
+  fi
   out=$(jxa color.js params "$1" "$icns") || die "Could not compute the tint for \"$1\" from $icns"
   local -a parts
   parts=( ${=out} )
@@ -940,6 +965,124 @@ extract_cwd() {
   print -r -- "$m"
 }
 
+applescript_string_body() {
+  local s=$1 out="" c i
+  for (( i = 1; i <= ${#s}; i++ )); do
+    c=${s[i]}
+    if [[ $c == '\' ]]; then
+      (( i++ ))
+      out+=${s[i]}
+    elif [[ $c == '"' ]]; then
+      break
+    else
+      out+=$c
+    fi
+  done
+  print -r -- "$out"
+}
+
+shell_first_word() {
+  local s=$1 out="" c i quote=""
+  for (( i = 1; i <= ${#s}; i++ )); do
+    c=${s[i]}
+    case $quote in
+      '"')
+        if [[ $c == '"' ]]; then
+          quote=""
+        elif [[ $c == '\' && ${s[i+1]} == (\"|\\|\$|\`) ]]; then
+          (( i++ ))
+          out+=${s[i]}
+        else
+          out+=$c
+        fi ;;
+      "'")
+        if [[ $c == "'" ]]; then quote=""; else out+=$c; fi ;;
+      *)
+        if [[ $c == [[:space:]] ]]; then
+          break
+        elif [[ $c == '"' || $c == "'" ]]; then
+          quote=$c
+        elif [[ $c == '\' ]]; then
+          (( i++ ))
+          out+=${s[i]}
+        else
+          out+=$c
+        fi ;;
+    esac
+  done
+  print -r -- "$out"
+}
+
+launcher_setting() {
+  local decompiled=$1 pattern=$2 line="" candidate before rest body value
+  for candidate in ${(f)decompiled}; do
+    if [[ $candidate == *"$pattern"* ]]; then
+      line=$candidate
+      break
+    fi
+  done
+  [[ -n $line ]] || { print -r -- -; return 0; }
+  before=${line%%"$pattern"*}
+  rest=${line#*"$pattern"}
+  body=$(applescript_string_body "$rest")
+  if [[ $before =~ 'quoted form of[[:space:]]+"$' ]]; then
+    value=$body
+  else
+    value=$(shell_first_word "$body")
+  fi
+  case $value in
+    '$HOME'|'$HOME'/*) value=$HOME${value#'$HOME'} ;;
+    '${HOME}'|'${HOME}'/*) value=$HOME${value#'${HOME}'} ;;
+    '~'|'~'/*) value=$HOME${value#'~'} ;;
+  esac
+  [[ $value == /* ]] || value=
+  print -r -- "${value:--}"
+}
+
+is_profile_app() {
+  local app=$1 bundle_id=$2 s
+  local SLUG ${PROFILE_KEYS[@]}
+  local -a PROFILE_DIRS reply
+  all_slugs
+  for s in $reply; do
+    profile_load "$s"
+    if same_path "$PROFILE_APP" "$app" || [[ ${(L)PROFILE_BUNDLE_ID} == ${(L)bundle_id} ]]; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+scan_candidates() {
+  SC_CAND=()
+  local app bundle_id launcher decompiled data_dir config_dir name base t=$'\t'
+  local source_id
+  source_id=$(src_id)
+  for app in "$APPS_DIR"/*.app(N-/); do
+    base=${app:t:r}
+    has_control_chars "$base" && continue
+    bundle_id=$(plist_get "$app" CFBundleIdentifier)
+    [[ $bundle_id == "$BUNDLE_ID_PREFIX".* ]] || continue
+    [[ $bundle_id != *.launcher ]] || continue
+    same_path "$app" "$SOURCE_APP" && continue
+    [[ ${(L)bundle_id} != ${(L)source_id} ]] || continue
+    is_profile_app "$app" "$bundle_id" && continue
+    launcher=- data_dir= config_dir=
+    if [[ -d "${app%.app} Launcher.app" ]]; then
+      launcher="${app%.app} Launcher.app"
+      decompiled=$(osadecompile "$launcher/Contents/Resources/Scripts/main.scpt" 2>/dev/null || true)
+      data_dir=$(launcher_setting "$decompiled" '--user-data-dir=')
+      config_dir=$(launcher_setting "$decompiled" 'CLAUDE_CONFIG_DIR=')
+      [[ $data_dir == - ]] && data_dir=
+      [[ $config_dir == - ]] && config_dir=
+    fi
+    [[ -n $config_dir ]] || config_dir=$(plist_get "$app" LSEnvironment:CLAUDE_CONFIG_DIR)
+    name=${base#Claude }
+    has_control_chars "$data_dir$config_dir" && continue
+    SC_CAND+=( "$app$t$launcher$t$bundle_id$t${data_dir:--}$t${config_dir:--}$t$name" )
+  done
+}
+
 iso_time() {
   strftime '%Y-%m-%dT%H:%M:%S%z' "$1"
 }
@@ -963,6 +1106,7 @@ cmd_scan() {
   setup_colors
   load_rules
   scan_collect
+  scan_candidates
   local i
   if (( PLAIN )); then
     for (( i = 1; i <= ${#SC_CFG}; i++ )); do
@@ -973,6 +1117,9 @@ cmd_scan() {
     done
     for (( i = 1; i <= ${#SP_CFG}; i++ )); do
       print -r -- "project"$'\t'"$SP_CFG[i]"$'\t'"$SP_CWD[i]"$'\t'"$SP_N[i]"$'\t'"$(iso_time $SP_MTIME[i])"$'\t'"$(rule_owner "$SP_CWD[i]")"
+    done
+    for i in $SC_CAND; do
+      print -r -- "candidate"$'\t'"$i"
     done
     return 0
   fi
@@ -990,6 +1137,15 @@ cmd_scan() {
   say "${C_BOLD}Projects${C_RESET}"
   for (( i = 1; i <= ${#SP_CFG}; i++ )); do
     say "  $(tilde "$SP_CWD[i]")  ${C_DIM}in $(tilde "$SP_CFG[i]"), $SP_N[i] sessions, last $(strftime '%Y-%m-%d %H:%M' $SP_MTIME[i]), owner $(rule_owner "$SP_CWD[i]")${C_RESET}"
+  done
+  say "${C_BOLD}Existing copies you can adopt${C_RESET}"
+  if (( ${#SC_CAND} == 0 )); then
+    say "  ${C_DIM}none${C_RESET}"
+  fi
+  local -a fields
+  for i in $SC_CAND; do
+    fields=( "${(@ps:\t:)i}" )
+    say "  $(tilde "$fields[1]")  ${C_DIM}name $fields[6], data $(tilde "$fields[4]"), config $(tilde "$fields[5]")${C_RESET}"
   done
 }
 
@@ -1045,7 +1201,23 @@ cmd_show() {
   done
   [[ -n $slug ]] || usage_error "show <slug>"
   setup_colors
+  local t=$'\t'
   if [[ $slug == default ]]; then
+    if (( PLAIN )); then
+      print -r -- "slug${t}default"
+      print -r -- "name${t}Claude"
+      print -r -- "color${t}-"
+      print -r -- "hue${t}0"
+      print -r -- "sat${t}1"
+      print -r -- "desktop${t}1"
+      print -r -- "cli${t}1"
+      print -r -- "app${t}$SOURCE_APP"
+      print -r -- "launcher${t}-"
+      print -r -- "bundle_id${t}$(src_id)"
+      print -r -- "data_dir${t}$MAIN_DATA_DIR"
+      print -r -- "config_dir${t}$MAIN_CONFIG_DIR"
+      return 0
+    fi
     say "slug        default"
     say "name        Claude"
     say "app         $SOURCE_APP ($(app_version "$SOURCE_APP"))"
@@ -1054,6 +1226,28 @@ cmd_show() {
     return 0
   fi
   profile_load "$slug"
+  if (( PLAIN )); then
+    local app=$PROFILE_APP launcher=$PROFILE_LAUNCHER bundle_id=$PROFILE_BUNDLE_ID data_dir=$PROFILE_DATA_DIR d
+    if (( ! PROFILE_DESKTOP )); then
+      app=- launcher=- bundle_id=- data_dir=-
+    fi
+    print -r -- "slug${t}$SLUG"
+    print -r -- "name${t}$PROFILE_NAME"
+    print -r -- "color${t}${PROFILE_COLOR:--}"
+    print -r -- "hue${t}${PROFILE_HUE:--}"
+    print -r -- "sat${t}${PROFILE_SAT:--}"
+    print -r -- "desktop${t}$PROFILE_DESKTOP"
+    print -r -- "cli${t}$PROFILE_CLI"
+    print -r -- "app${t}$app"
+    print -r -- "launcher${t}$launcher"
+    print -r -- "bundle_id${t}$bundle_id"
+    print -r -- "data_dir${t}$data_dir"
+    print -r -- "config_dir${t}$PROFILE_CONFIG_DIR"
+    for d in $PROFILE_DIRS; do
+      print -r -- "dir${t}$d"
+    done
+    return 0
+  fi
   local state=-
   if (( PROFILE_DESKTOP )); then
     if [[ -d $PROFILE_APP ]]; then
@@ -1437,6 +1631,10 @@ cmd_recolor() {
     can_prompt || usage_error "recolor needs --color, --hue or --pick-color"
     color_kind=pick
   fi
+  local src
+  if (( PROFILE_DESKTOP )) && [[ -d $PROFILE_APP ]]; then
+    src=$(source_icns) || die "No .icns icon found in $SOURCE_APP; it is needed to tint $PROFILE_APP."
+  fi
   apply_color_choice "$color_kind" "$color_value"
   profile_save
   say "Color of \"$SLUG\" is now $PROFILE_COLOR (hue shift $PROFILE_HUE, saturation x$PROFILE_SAT)"
@@ -1450,10 +1648,9 @@ cmd_recolor() {
   assert_ours "$PROFILE_APP" "$PROFILE_BUNDLE_ID"
   need_lock
   choose_sign_id
-  local dst_icns src
+  local dst_icns
   dst_icns=$(copy_icns_path "$PROFILE_APP")
   [[ -n $dst_icns ]] || die "$PROFILE_APP has no CFBundleIconFile; rebuild it: claude-profiles build $SLUG"
-  src=$(source_icns)
   say "Tinting icon..."
   tint_icns "$src" "$TMP/recolor.icns" "$PROFILE_HUE" "$PROFILE_SAT" || die "Tinting failed."
   cp -f -- "$TMP/recolor.icns" "$dst_icns"
@@ -1796,6 +1993,13 @@ cmd_adopt() {
   valid_slug "$slug" || usage_error "invalid slug \"$slug\""
   valid_name "$name" || usage_error "invalid name \"$name\""
   valid_identity "${identity:--}" || usage_error "invalid identity \"$identity\" (letters, digits, space, dot, underscore, dash)"
+  local flag dir_value
+  for flag dir_value in --data-dir "$data_dir" --config-dir "$config_dir"; do
+    [[ -n $dir_value ]] || continue
+    dir_value=${dir_value/#\~/$HOME}
+    [[ $dir_value == /* ]] || die "$flag must be an absolute path: $dir_value"
+    [[ -d $dir_value ]] || die "$flag is not an existing directory: $dir_value"
+  done
   ensure_config
   profile_exists "$slug" && die "Profile \"$slug\" already exists."
   app=$(abs_path "$app")
@@ -2285,7 +2489,7 @@ shell_quote() {
   print -r -- "${(qq)1}"
 }
 
-cmd_shell_init() {
+shell_init_emit() {
   local shell_name=${1:-}
   [[ $shell_name == (zsh|bash) ]] || usage_error "shell-init zsh|bash"
   local SLUG ${PROFILE_KEYS[@]} s
@@ -2412,6 +2616,601 @@ cmd_dirs() {
   fi
 }
 
+config_dir_running() {
+  local cfg=$1 pid envline s
+  local SLUG ${PROFILE_KEYS[@]}
+  local -a PROFILE_DIRS reply
+  for pid in ${(f)"$(pgrep -x claude 2>/dev/null || true)"}; do
+    [[ -n $pid ]] || continue
+    envline=" $(ps -E -ww -o command= -p "$pid" 2>/dev/null || true) "
+    if is_main_config "$cfg"; then
+      [[ $envline == *" CLAUDE_CONFIG_DIR="* ]] || return 0
+    elif [[ $envline == *" CLAUDE_CONFIG_DIR=$cfg "* ]]; then
+      return 0
+    fi
+  done
+  if is_main_config "$cfg" && is_running "$SOURCE_APP"; then
+    return 0
+  fi
+  all_slugs
+  for s in $reply; do
+    profile_load "$s"
+    if (( PROFILE_DESKTOP )) && same_path "$PROFILE_CONFIG_DIR" "$cfg" && is_running "$PROFILE_APP"; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+projects_list() {
+  local i kind t=$'\t'
+  while (( $# )); do
+    case $1 in
+      --plain) PLAIN=1; shift ;;
+      --yes|-y) YES=1; shift ;;
+      *) usage_error "projects <slug> list [--plain]" ;;
+    esac
+  done
+  setup_colors
+  scan_collect
+  local found=0
+  for (( i = 1; i <= ${#SP_CFG}; i++ )); do
+    same_path "$SP_CFG[i]" "$PROFILE_CONFIG_DIR" || continue
+    found=1
+    kind=dir
+    [[ -L $SP_CFG[i]/projects/$SP_DIR[i] ]] && kind=symlink
+    if (( PLAIN )); then
+      print -r -- "project${t}$SP_CWD[i]${t}$SP_N[i]${t}$(iso_time $SP_MTIME[i])${t}$kind"
+    else
+      say "  $(tilde "$SP_CWD[i]")  ${C_DIM}$SP_N[i] sessions, last $(strftime '%Y-%m-%d %H:%M' $SP_MTIME[i]), $kind${C_RESET}"
+    fi
+  done
+  if (( ! found && ! PLAIN )); then
+    say "${C_DIM}No session history in $(tilde "$PROFILE_CONFIG_DIR")${C_RESET}"
+  fi
+}
+
+projects_add() {
+  local mode=symlink add_dir=1 cwd idx i
+  local -a cwds plan_cwd plan_cfg plan_dir already
+  while (( $# )); do
+    case $1 in
+      --mode) need_value "$@"; mode=$2; shift 2 ;;
+      --no-dir) add_dir=0; shift ;;
+      --yes|-y) YES=1; shift ;;
+      --plain) PLAIN=1; shift ;;
+      -*) usage_error "projects <slug> add [--mode symlink|move|copy] [--no-dir] [--yes] CWD..." ;;
+      *) cwds+=( "$1" ); shift ;;
+    esac
+  done
+  (( ${#cwds} )) || usage_error "projects <slug> add [--mode symlink|move|copy] [--no-dir] [--yes] CWD..."
+  [[ $mode == (symlink|move|copy) ]] || usage_error "--mode must be symlink, move or copy"
+  reject_control_chars "projects arguments" "${cwds[@]}"
+  setup_colors
+  scan_collect
+  local -A seen_cwd
+  for cwd in $cwds; do
+    cwd=$(abs_path "$cwd")
+    (( ! ${+seen_cwd[$cwd]} )) || continue
+    seen_cwd[$cwd]=1
+    local in_target=0
+    for (( i = 1; i <= ${#SP_CWD}; i++ )); do
+      if [[ $SP_CWD[i] == "$cwd" ]] && same_path "$SP_CFG[i]" "$PROFILE_CONFIG_DIR"; then
+        in_target=1
+      fi
+    done
+    if (( in_target )); then
+      already+=( "$cwd" )
+      continue
+    fi
+    idx=$(find_project_source "$cwd" "$PROFILE_CONFIG_DIR")
+    (( idx > 0 )) || die "No session history found for $cwd in the scanned config dirs (see: claude-profiles scan)."
+    plan_cwd+=( "$cwd" )
+    plan_cfg+=( "$SP_CFG[idx]" )
+    plan_dir+=( "$SP_DIR[idx]" )
+  done
+
+  local -A busy_checked
+  local src_cfg
+  if [[ $mode == move ]]; then
+    for src_cfg in $plan_cfg; do
+      (( ! ${+busy_checked[$src_cfg]} )) || continue
+      busy_checked[$src_cfg]=1
+      if config_dir_running "$src_cfg"; then
+        if (( YES )); then
+          warn "Claude is running with config dir $src_cfg; moving anyway (--yes). It may rewrite .claude.json and undo the change."
+        else
+          die "Claude is running with config dir $src_cfg. Quit it, or re-run with --yes to move anyway."
+        fi
+      fi
+    done
+  fi
+  if (( ${#plan_cwd} )) && config_dir_running "$PROFILE_CONFIG_DIR"; then
+    warn "Claude is running with config dir $PROFILE_CONFIG_DIR; it may rewrite .claude.json and undo project-entry changes."
+  fi
+
+  for cwd in $already; do
+    say "$cwd already has history in $(tilde "$PROFILE_CONFIG_DIR"); nothing to $mode"
+  done
+  for (( i = 1; i <= ${#plan_cwd}; i++ )); do
+    link_project "$plan_cfg[i]" "$plan_dir[i]" "$plan_cwd[i]" "$mode" "$PROFILE_CONFIG_DIR"
+  done
+  if (( add_dir )); then
+    local d changed=0
+    for d in $already $plan_cwd; do
+      if (( ! ${PROFILE_DIRS[(Ie)$d]} )); then
+        PROFILE_DIRS+=( "$d" )
+        changed=1
+        say "Added $d to the folders of \"$SLUG\""
+      fi
+    done
+    if (( changed )); then
+      profile_save
+      regen_rules
+    fi
+  fi
+  say "Done: ${#plan_cwd} project(s) $mode, ${#already} already present."
+}
+
+cmd_projects() {
+  local target=${1:-} action=${2:-}
+  [[ -n $target && -n $action ]] || usage_error "projects <slug> list [--plain] | projects <slug> add [--mode symlink|move|copy] [--no-dir] [--yes] CWD..."
+  shift 2
+  setup_colors
+  profile_load "$target"
+  case $action in
+    list) projects_list "$@" ;;
+    add) projects_add "$@" ;;
+    *) usage_error "projects <slug> list [--plain] | projects <slug> add [--mode symlink|move|copy] [--no-dir] [--yes] CWD..." ;;
+  esac
+}
+
+default_shell_name() {
+  if [[ ${SHELL:t} == bash ]]; then
+    print -r -- bash
+  else
+    print -r -- zsh
+  fi
+}
+
+default_rc_file() {
+  if [[ $1 == bash ]]; then
+    print -r -- "$HOME/.bashrc"
+  else
+    print -r -- "$HOME/.zshrc"
+  fi
+}
+
+stable_cli_path() {
+  if [[ -e $DEFAULT_BIN_DIR/claude-profiles ]]; then
+    print -r -- "$DEFAULT_BIN_DIR/claude-profiles"
+  else
+    print -r -- "$SELF"
+  fi
+}
+
+rc_block_text() {
+  local cli ref
+  cli=$(stable_cli_path)
+  if [[ $cli =~ '^[A-Za-z0-9_./+@:-]+$' ]]; then
+    ref=$cli
+  else
+    ref=${(qq)cli}
+  fi
+  print -r -- "$RC_BEGIN"
+  print -r -- "eval \"\$($ref shell-init $1)\""
+  print -r -- "$RC_END"
+}
+
+rc_block_state() {
+  local f=$1 b e bn en
+  if [[ ! -f $f ]]; then
+    print -r -- absent
+    return 0
+  fi
+  b=$(grep -cxF -- "$RC_BEGIN" "$f" || true)
+  e=$(grep -cxF -- "$RC_END" "$f" || true)
+  if (( b == 0 && e == 0 )); then
+    print -r -- absent
+    return 0
+  fi
+  if (( b == 1 && e == 1 )); then
+    bn=$(grep -nxF -- "$RC_BEGIN" "$f" | cut -d: -f1)
+    en=$(grep -nxF -- "$RC_END" "$f" | cut -d: -f1)
+    if (( bn < en )); then
+      print -r -- present
+      return 0
+    fi
+  fi
+  print -r -- malformed
+}
+
+rc_rewrite() {
+  local mode=$1 f=$2 block=$3 input=$2
+  [[ -f $f ]] || input=/dev/null
+  CP_BLOCK=$block awk -v mode="$mode" -v begin="$RC_BEGIN" -v end="$RC_END" '
+    $0 == begin {
+      if (mode == "uninstall" && n > 0 && out[n] == "") n--
+      if (mode == "install") out[++n] = ENVIRON["CP_BLOCK"]
+      skip = 1; found = 1; next
+    }
+    skip { if ($0 == end) skip = 0; next }
+    { out[++n] = $0 }
+    END {
+      if (mode == "install" && !found) {
+        if (n > 0) out[++n] = ""
+        out[++n] = ENVIRON["CP_BLOCK"]
+      }
+      for (i = 1; i <= n; i++) print out[i]
+    }
+  ' "$input"
+}
+
+rc_write() {
+  local rc=$1 new=$2
+  mkdir -p -- "${rc:h}"
+  if [[ -f $rc ]]; then
+    local backup=$rc.claude-profiles.bak
+    [[ ! -e $backup ]] || backup=$backup.$(date +%Y%m%d-%H%M%S)
+    [[ ! -e $backup ]] || backup=$backup.$$
+    cp -p -- "$rc" "$backup"
+  fi
+  cat -- "$new" > "$rc"
+}
+
+conflicts_in_file() {
+  local f=$1 depth=$2 re=$3 line num text p
+  local -a hits words
+  [[ -f $f ]] || return 0
+  (( ! ${+CF_SEEN[${f:A}]} )) || return 0
+  CF_SEEN[${f:A}]=1
+  hits=( ${(f)"$(awk -v begin="$RC_BEGIN" -v end="$RC_END" -v re="$re" '
+    $0 == begin { skip = 1; next }
+    skip { if ($0 == end) skip = 0; next }
+    $0 ~ ("^[[:space:]]*(function[[:space:]]+" re "([[:space:]]*\\(\\))?([[:space:]]|\\{|$)|" re "[[:space:]]*\\(\\)|alias[[:space:]]+(-[a-zA-Z]+[[:space:]]+)*" re "=)") { print NR "\t" $0 }
+  ' "$f" 2>/dev/null || true)"} )
+  for line in $hits; do
+    num=${line%%$'\t'*}
+    text=${line#*$'\t'}
+    text=${text//$'\t'/ }
+    text=${text##[[:space:]]##}
+    CF_FOUND+=( "$(tilde "$f"):$num: ${text[1,100]}" )
+  done
+  (( depth < 3 )) || return 0
+  for line in ${(f)"$(grep -E '(^|[[:space:];&|])(source|\.)[[:space:]]+[^[:space:]]' "$f" 2>/dev/null || true)"}; do
+    [[ $line =~ '(^|[[:space:];&|])(source|\.)[[:space:]]+(.*)$' ]] || continue
+    words=( ${(z)match[3]} )
+    p=${(Q)words[1]:-}
+    p=${p/#\~/$HOME}
+    p=${p//'${ZDOTDIR:-$HOME}'/$HOME}
+    p=${p//'${HOME}'/$HOME}
+    p=${p//'$HOME'/$HOME}
+    [[ $p == /* && $p != *'$'* && $p != *'`'* ]] || continue
+    conflicts_in_file "$p" $(( depth + 1 )) "$re"
+  done
+}
+
+rc_conflicts() {
+  local re s f
+  local -a reply
+  re=default
+  all_slugs
+  for s in $reply; do
+    re+="|$s"
+  done
+  re="claude(-($re))?"
+  typeset -gA CF_SEEN
+  CF_SEEN=()
+  typeset -ga CF_FOUND
+  CF_FOUND=()
+  for f in "$@"; do
+    conflicts_in_file "$f" 0 "$re"
+  done
+}
+
+shell_init_rc_files() {
+  local shell_name=$1
+  if [[ $shell_name == bash ]]; then
+    print -r -- "$HOME/.bash_profile"
+    print -r -- "$HOME/.bash_login"
+    print -r -- "$HOME/.profile"
+    print -r -- "$HOME/.bashrc"
+  else
+    print -r -- "$HOME/.zshenv"
+    print -r -- "$HOME/.zprofile"
+    print -r -- "$HOME/.zshrc"
+    print -r -- "$HOME/.zlogin"
+  fi
+}
+
+shell_init_manage() {
+  local action=$1
+  shift
+  local shell_name="" rc="" t=$'\t'
+  while (( $# )); do
+    case $1 in
+      zsh|bash) shell_name=$1; shift ;;
+      --rc) need_value "$@"; rc=$2; shift 2 ;;
+      --plain) PLAIN=1; shift ;;
+      --yes|-y) YES=1; shift ;;
+      *) usage_error "shell-init install|uninstall|status [zsh|bash] [--rc FILE] [--plain]" ;;
+    esac
+  done
+  setup_colors
+  reject_control_chars "--rc" "$rc"
+  [[ -n $shell_name ]] || shell_name=$(default_shell_name)
+  local explicit_rc=0
+  [[ -n $rc ]] && explicit_rc=1
+  [[ -n $rc ]] || rc=$(default_rc_file "$shell_name")
+  rc=$(abs_path "$rc")
+  local state
+  state=$(rc_block_state "$rc")
+  case $action in
+    install)
+      [[ $state != malformed ]] || die "$rc has an unbalanced claude-profiles marker block. Fix or delete the lines between \"$RC_BEGIN\" and \"$RC_END\" by hand."
+      local new=$TMP/rc.new
+      rc_rewrite install "$rc" "$(rc_block_text "$shell_name")" > "$new"
+      if [[ -f $rc ]] && cmp -s "$new" "$rc"; then
+        say "Shell integration is already installed in $rc"
+        return 0
+      fi
+      rc_write "$rc" "$new"
+      say "Installed the claude-profiles block in $rc"
+      say "Open a new terminal, or run: source ${(q-)rc}" ;;
+    uninstall)
+      [[ $state != malformed ]] || die "$rc has an unbalanced claude-profiles marker block. Fix or delete the lines between \"$RC_BEGIN\" and \"$RC_END\" by hand."
+      if [[ $state == absent ]]; then
+        say "Shell integration is not installed in $rc"
+        return 0
+      fi
+      local new=$TMP/rc.new
+      rc_rewrite uninstall "$rc" "" > "$new"
+      rc_write "$rc" "$new"
+      say "Removed the claude-profiles block from $rc" ;;
+    status)
+      local installed=0 c
+      [[ $state == present ]] && installed=1
+      local -a files
+      if (( explicit_rc )); then
+        files=( "$rc" )
+      else
+        files=( ${(f)"$(shell_init_rc_files "$shell_name")"} )
+      fi
+      rc_conflicts "${files[@]}"
+      if (( PLAIN )); then
+        print -r -- "installed${t}$installed${t}$rc"
+        for c in $CF_FOUND; do
+          print -r -- "conflict${t}$c"
+        done
+      else
+        if (( installed )); then
+          say "Shell integration: installed in $(tilde "$rc")"
+        else
+          say "Shell integration: not installed ($(tilde "$rc"))"
+        fi
+        for c in $CF_FOUND; do
+          say "  conflict: $c"
+        done
+      fi ;;
+  esac
+}
+
+cmd_shell_init() {
+  case ${1:-} in
+    install|uninstall|status) shell_init_manage "$@" ;;
+    *) shell_init_emit "$@" ;;
+  esac
+}
+
+plist_array() {
+  $PB -c "Print :$2" "$1" 2>/dev/null | awk 'NR == 1 || /^}$/ { next } { sub(/^ +/, ""); print }' || true
+}
+
+agent_loaded() {
+  launchctl print "gui/$(id -u)/$1" >/dev/null 2>&1
+}
+
+legacy_agents_collect() {
+  LA_PLIST=() LA_LABEL=() LA_LOADED=() LA_PROGRAM=()
+  local plist label program hay s needle matched
+  local SLUG ${PROFILE_KEYS[@]}
+  local -a PROFILE_DIRS reply needles
+  needles=( "$SOURCE_APP" )
+  all_slugs
+  for s in $reply; do
+    profile_load "$s"
+    if (( PROFILE_DESKTOP )); then
+      needles+=( "$PROFILE_APP" )
+    fi
+  done
+  for plist in "$AGENTS_DIR"/*.plist(N); do
+    label=$(plutil -extract Label raw -o - "$plist" 2>/dev/null || true)
+    [[ -n $label ]] || label=${plist:t:r}
+    [[ $label != "$AGENT_LABEL" && ${plist:t:r} != "$AGENT_LABEL" ]] || continue
+    has_control_chars "$label$plist" && continue
+    program=${(j: :)${(f)"$(plist_array "$plist" ProgramArguments)"}}
+    hay="$program"$'\n'"$(plist_array "$plist" WatchPaths)"
+    matched=0
+    for needle in $needles; do
+      if [[ $hay == *"$needle"* ]]; then
+        matched=1
+        break
+      fi
+    done
+    (( matched )) || continue
+    LA_PLIST+=( "$plist" )
+    LA_LABEL+=( "$label" )
+    LA_PROGRAM+=( "${program//$'\t'/ }" )
+    if agent_loaded "$label"; then
+      LA_LOADED+=( 1 )
+    else
+      LA_LOADED+=( 0 )
+    fi
+  done
+}
+
+cmd_legacy_agents() {
+  local action=list label="" i loaded_text t=$'\t'
+  if [[ ${1:-} == disable ]]; then
+    action=disable
+    shift
+  fi
+  while (( $# )); do
+    case $1 in
+      --plain) PLAIN=1; shift ;;
+      --yes|-y) YES=1; shift ;;
+      -*) usage_error "legacy-agents [--plain] | legacy-agents disable LABEL [--yes]" ;;
+      *) [[ $action == disable && -z $label ]] || usage_error "legacy-agents [--plain] | legacy-agents disable LABEL [--yes]"; label=$1; shift ;;
+    esac
+  done
+  setup_colors
+  if [[ $action == disable ]]; then
+    [[ -n $label ]] || usage_error "legacy-agents disable LABEL [--yes]"
+  fi
+  legacy_agents_collect
+  if [[ $action == list ]]; then
+    for (( i = 1; i <= ${#LA_LABEL}; i++ )); do
+      if (( PLAIN )); then
+        print -r -- "agent${t}$LA_LABEL[i]${t}$LA_PLIST[i]${t}$LA_LOADED[i]${t}$LA_PROGRAM[i]"
+      else
+        loaded_text="not loaded"
+        [[ $LA_LOADED[i] == 1 ]] && loaded_text=loaded
+        say "$LA_LABEL[i]  ${C_DIM}$loaded_text  $(tilde "$LA_PLIST[i]")  $LA_PROGRAM[i]${C_RESET}"
+      fi
+    done
+    if (( ! PLAIN && ${#LA_LABEL} == 0 )); then
+      say "${C_DIM}No other LaunchAgents watch $(tilde "$SOURCE_APP") or a profile copy.${C_RESET}"
+    fi
+    return 0
+  fi
+  local idx=0
+  for (( i = 1; i <= ${#LA_LABEL}; i++ )); do
+    [[ $LA_LABEL[i] == "$label" ]] && idx=$i
+  done
+  (( idx > 0 )) || die "\"$label\" is not a legacy agent listed by: claude-profiles legacy-agents"
+  local plist=$LA_PLIST[idx]
+  [[ ! -e $plist.disabled ]] || die "$plist.disabled already exists; not overwriting it."
+  confirm "Unload LaunchAgent \"$label\" and rename $plist to ${plist:t}.disabled?" || { say "Cancelled."; return 0; }
+  if [[ $LA_LOADED[idx] == 1 ]]; then
+    say "Unloading $label..."
+    launchctl bootout "gui/$(id -u)/$label" || die "launchctl bootout failed for $label; plist left in place."
+  else
+    say "$label is not loaded."
+  fi
+  mv -- "$plist" "$plist.disabled"
+  say "Renamed $plist to $plist.disabled (re-enable by renaming it back and running launchctl bootstrap)."
+}
+
+cmd_status() {
+  while (( $# )); do
+    case $1 in
+      --plain) PLAIN=1; shift ;;
+      --yes|-y) YES=1; shift ;;
+      *) usage_error "status [--plain]" ;;
+    esac
+  done
+  setup_colors
+  local t=$'\t' link=$DEFAULT_BIN_DIR/claude-profiles
+  local cli_installed=0 present=0 usable=0 agent_loaded_flag=0 version=- team_ok=0 scheme handler
+  [[ -x $link ]] && cli_installed=1
+  if [[ $SIGN_IDENTITY != - ]] && identity_present; then
+    present=1
+    [[ $(probe_sign_id) == "$SIGN_IDENTITY" ]] && usable=1
+  fi
+  agent_loaded "$AGENT_LABEL" && agent_loaded_flag=1
+  if [[ -d $SOURCE_APP ]]; then
+    version=$(app_version "$SOURCE_APP")
+    source_team_ok && team_ok=1
+  fi
+  scheme=$(url_scheme)
+  handler=$(url_get "$scheme")
+  if (( PLAIN )); then
+    print -r -- "cli_installed${t}$cli_installed${t}$link"
+    print -r -- "identity${t}$SIGN_IDENTITY${t}$present${t}$usable"
+    print -r -- "agent${t}$AGENT_LABEL${t}$agent_loaded_flag"
+    print -r -- "source${t}$SOURCE_APP${t}$version${t}$team_ok"
+    print -r -- "handler${t}$scheme${t}$handler"
+    print -r -- "home${t}$CP_HOME"
+    return 0
+  fi
+  local cli_text="not installed (run: claude-profiles install-cli)" agent_text="not loaded" team_text=failed
+  (( cli_installed )) && cli_text="installed at $(tilde "$link")"
+  (( agent_loaded_flag )) && agent_text=loaded
+  (( team_ok )) && team_text=ok
+  say "${C_BOLD}Command-line tool${C_RESET}  $cli_text"
+  say "${C_BOLD}Signing identity${C_RESET}  $SIGN_IDENTITY  present $present, usable $usable"
+  say "${C_BOLD}Auto-rebuild agent${C_RESET}  $AGENT_LABEL  $agent_text"
+  say "${C_BOLD}Source app${C_RESET}  $(tilde "$SOURCE_APP")  $version  signature check $team_text"
+  say "${C_BOLD}$scheme:// handler${C_RESET}  $handler"
+  say "${C_BOLD}Config home${C_RESET}  $(tilde "$CP_HOME")"
+}
+
+cmd_install_cli() {
+  local from=$ROOT share_dir=$DEFAULT_SHARE_DIR bin_dir=$DEFAULT_BIN_DIR prefix=""
+  local share_given=0 bin_given=0
+  while (( $# )); do
+    case $1 in
+      --from) need_value "$@"; from=$2; shift 2 ;;
+      --prefix) need_value "$@"; prefix=$2; shift 2 ;;
+      --share-dir) need_value "$@"; share_dir=$2; share_given=1; shift 2 ;;
+      --bin-dir) need_value "$@"; bin_dir=$2; bin_given=1; shift 2 ;;
+      --yes|-y) YES=1; shift ;;
+      --plain) PLAIN=1; shift ;;
+      *) usage_error "install-cli [--from DIR] [--prefix DIR] [--share-dir DIR] [--bin-dir DIR]" ;;
+    esac
+  done
+  setup_colors
+  reject_control_chars "install-cli options" "$from" "$prefix" "$share_dir" "$bin_dir"
+  if [[ -n $prefix ]]; then
+    prefix=$(abs_path "$prefix")
+    (( share_given )) || share_dir=$prefix/share/claude-profiles
+    (( bin_given )) || bin_dir=$prefix/bin
+  fi
+  from=$(abs_path "$from")
+  share_dir=$(abs_path "$share_dir")
+  bin_dir=$(abs_path "$bin_dir")
+  [[ -f $from/bin/claude-profiles && -d $from/lib ]] || die "$from does not contain bin/claude-profiles and lib/."
+  local link=$bin_dir/claude-profiles
+  if [[ -e $link && ! -L $link ]]; then
+    die "$link exists and is not a symlink; not replacing it."
+  fi
+  if same_path "$from" "$share_dir"; then
+    say "Already running from $share_dir; nothing to copy."
+  else
+    local stage=$share_dir.new old=$share_dir.old
+    say "Installing the CLI into $(tilde "$share_dir")..."
+    mkdir -p -- "${share_dir:h}"
+    rm -rf -- "$stage" "$old"
+    mkdir -p -- "$stage"
+    ditto --noqtn "$from/bin" "$stage/bin"
+    ditto --noqtn "$from/lib" "$stage/lib"
+    if [[ -f $from/VERSION ]]; then
+      ditto --noqtn "$from/VERSION" "$stage/VERSION"
+    fi
+    chmod -R go-w "$stage"
+    say "Swapping into place..."
+    if [[ -e $share_dir || -L $share_dir ]]; then
+      mv -- "$share_dir" "$old"
+    fi
+    if ! mv -- "$stage" "$share_dir"; then
+      [[ ! -e $old ]] || mv -- "$old" "$share_dir"
+      die "Could not move the new copy into place; the previous one was kept."
+    fi
+    rm -rf -- "$old"
+  fi
+  mkdir -p -- "$bin_dir"
+  ln -sfn -- "$share_dir/bin/claude-profiles" "$link"
+  say "Linked $(tilde "$link") -> $(tilde "$share_dir/bin/claude-profiles")"
+  if [[ ":$PATH:" != *":$bin_dir:"* ]]; then
+    say "Note: $(tilde "$bin_dir") is not on your PATH."
+  fi
+  local installed_version=unknown
+  if [[ -r $share_dir/VERSION ]]; then
+    installed_version=${$(<"$share_dir/VERSION")//[[:space:]]/}
+  fi
+  say "Installed claude-profiles $installed_version"
+}
+
 main() {
   local cmd=${1:-help}
   (( $# )) && shift
@@ -2437,6 +3236,10 @@ main() {
     uninstall-agent) cmd_uninstall_agent ;;
     shell-init) cmd_shell_init "$@" ;;
     dirs) cmd_dirs "$@" ;;
+    projects) cmd_projects "$@" ;;
+    legacy-agents) cmd_legacy_agents "$@" ;;
+    status) cmd_status "$@" ;;
+    install-cli) cmd_install_cli "$@" ;;
     version|--version|-v) print -r -- "claude-profiles $CP_VERSION" ;;
     help|--help|-h) usage ;;
     *) print -u2 -r -- "Unknown command: $cmd"; usage >&2; exit 2 ;;
