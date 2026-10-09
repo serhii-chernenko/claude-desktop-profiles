@@ -132,6 +132,16 @@ struct ProfileDetailView: View {
                         layoutBlockNotice(blockers)
                     }
                 }
+                if details?.dockNeedsFix ?? false {
+                    ActionRow(title: "Fix Dock",
+                              caption: "Keeps only the launcher in the Dock; a pinned app copy would open on the wrong profile",
+                              systemImage: "dock.rectangle") {
+                        Button("Fix Dock") {
+                            Task { await model.run("Fix the Dock for \(profile.name)", ["dock", profile.slug, "fix", "--yes"]) }
+                        }
+                        .disabled(model.isBusy)
+                    }
+                }
                 ActionRow(title: "Rebuild",
                           caption: "Recreates the app copy and launcher from the current Claude.app. Sign-in and history are kept.",
                           systemImage: "arrow.triangle.2.circlepath") {

@@ -12,7 +12,7 @@ All commands are zsh. Replace the placeholders in the variables block once, then
 
 1. **`claude-profiles setup`** (signing identity import, trust prompt, key partition list, `launchctl bootstrap`). It needs the login password and cannot run in a sandboxed or auto-mode agent. Never run it for the user and never run its individual `security` or `launchctl` steps by hand. Ask the user to open Terminal and run `<repo>/bin/claude-profiles setup`.
 2. **The Keychain prompt** for "Claude Safe Storage" on the first launch of a new copy: the user must click **Always Allow**. Likewise macOS privacy prompts (microphone, screen recording, accessibility).
-3. **Pinning the launcher to the Dock** (drag `/Applications/Claude <Name>.app`, the launcher, onto the Dock, or right-click its icon, Options, Keep in Dock). The app copy itself is in the hidden folder `/Applications/.claude-profiles` and is never pinned. After `migrate-layout`, the old Dock item is dead: ask the user to remove it and pin the new one.
+3. **Pinning the launcher to the Dock** (drag `/Applications/Claude <Name>.app`, the launcher, onto the Dock, or right-click its icon, Options, Keep in Dock). The app copy itself is in the hidden folder `/Applications/.claude-profiles` and is never pinned. `migrate-layout` repoints a dead Dock pin of the old launcher and drops pins of the copy by itself; `dock <slug> fix --dry-run` previews it (`show --plain` prints a `dock` row, `copy_pinned` or `old_launcher_pinned` when it is needed).
 4. **Signing in** to the new account inside the new copy.
 
 **Ask the user before doing any of these:**
@@ -35,7 +35,7 @@ These all accept `--yes` and the read-only ones accept `--plain`. Run `bin/claud
 | Register a hand-made copy | `scan --plain` prints `candidate` rows (app, launcher, bundle ID, data dir, config dir, name, signing identity or `-`); pass them to `adopt --slug s --name N --app PATH [--launcher PATH] [--data-dir P] [--config-dir P] [--identity NAME]` (the identity is detected from the copy when omitted) |
 | Shell hook in `~/.zshrc` | `shell-init status --plain`, then `shell-init install` or `shell-init uninstall` (an idempotent marked block; ask first, because it edits a shell startup file) |
 | Old hand-made LaunchAgents | `legacy-agents --plain` to list, `legacy-agents disable LABEL --yes` to unload and rename one (ask first) |
-| Move an old-layout profile to the new layout | `show <slug> --plain` prints `layout` `legacy` or `hidden`. For `legacy`: quit the copy (ask first), `migrate-layout <slug> --yes`. It exits 3 and prints `agent` rows when an old LaunchAgent would recreate the copy; ask the user, then `legacy-agents disable LABEL --yes` and retry. `build` does the same move on its own. Only the user can re-pin the launcher in the Dock afterwards |
+| Move an old-layout profile to the new layout | `show <slug> --plain` prints `layout` `legacy` or `hidden`. For `legacy`: quit the copy (ask first), `migrate-layout <slug> --yes`. It exits 3 and prints `agent` rows when an old LaunchAgent would recreate the copy; ask the user, then `legacy-agents disable LABEL --yes` and retry. `build` does the same move on its own. The Dock pins are fixed by the same command (`dock <slug> fix`) |
 | CLI on the PATH | `install-cli` copies the tool to `~/.local/share/claude-profiles` and links `~/.local/bin/claude-profiles` |
 
 `setup` is never in this list: it is always run by the human in Terminal, because it needs their login password. The native app does the same: its **Set Up** button opens Terminal for the user and never handles the password.
@@ -119,7 +119,7 @@ echo "executable: $EXE"
 
 ## 3. Tint the icon
 
-Tint every PNG of the icon set with the `color.js tint` command from `lib/` of this repository (inside the app it is `Contents/Resources/cli/lib/color.js`). It samples the dominant color of the source icon and remaps it exactly to `$COLOR` (hue shift plus saturation and value scaling through a `CIColorCube` lookup table), so the white glyph and the edges stay intact:
+Tint every PNG of the icon set with the `color.js tint` command from `lib/` of this repository (inside the app it is `Contents/Resources/cli/lib/color.js`). It fills the colored region of the source icon with exactly `$COLOR` and overlays a subtle dark-at-the-bottom gradient measured from the source icon, so the top of the tile matches `$COLOR` and the white glyph and edges stay intact:
 
 ```zsh
 ICON_FILE=$($PB -c "Print :CFBundleIconFile" "$PLIST" 2>/dev/null || true)
@@ -407,7 +407,7 @@ codesign --verify --deep --strict "$APP" && echo "signature ok after"
 "$LSREG" -u "$OLD_LAUNCHER"; rm -rf "$OLD_LAUNCHER"
 ```
 
-Then repeat step 6 (the launcher is built at `/Applications/Claude $NAME.app`, the path the copy just left), update `PROFILE_APP` and `PROFILE_LAUNCHER` in `~/.config/claude-profiles/profiles/<slug>.env`, and restart the Dock. Do not rebuild or re-sign the copy: moving keeps its signature and designated requirement, so Keychain and privacy permissions are unaffected. Tell the user to re-pin the launcher.
+Then repeat step 6 (the launcher is built at `/Applications/Claude $NAME.app`, the path the copy just left), update `PROFILE_APP` and `PROFILE_LAUNCHER` in `~/.config/claude-profiles/profiles/<slug>.env`, and restart the Dock. Do not rebuild or re-sign the copy: moving keeps its signature and designated requirement, so Keychain and privacy permissions are unaffected. Remove Dock pins of the copy and repoint pins of the old launcher (`claude-profiles dock <slug> fix --yes`).
 
 ## 9. After Claude updates
 

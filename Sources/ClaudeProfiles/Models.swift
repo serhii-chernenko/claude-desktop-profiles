@@ -65,6 +65,9 @@ struct ProfileDetails: Equatable {
     }
 
     var usesLegacyLayout: Bool { value("layout") == "legacy" }
+
+    var dockState: String? { value("dock")?.split(separator: " ").first.map(String.init) }
+    var dockNeedsFix: Bool { dockState == "copy_pinned" || dockState == "old_launcher_pinned" }
 }
 
 struct ProfileProject: Identifiable, Hashable {

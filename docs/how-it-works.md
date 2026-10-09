@@ -78,14 +78,14 @@ Auto-mode agents and sandboxed shells cannot import keychain identities, answer 
 
 ### 9. The icon
 
-Modern Claude.app has both `CFBundleIconName` (an asset catalog, `Assets.car`) and `CFBundleIconFile` (`electron.icns`). The system prefers the catalog, which would show the original icon. The build deletes `CFBundleIconName` in the copy so the tinted `.icns` is used. `lib/color.js tint` recolors every PNG of the iconset with an exact mapping, then `iconutil` rebuilds the `.icns`:
+Modern Claude.app has both `CFBundleIconName` (an asset catalog, `Assets.car`) and `CFBundleIconFile` (`electron.icns`). The system prefers the catalog, which would show the original icon. The build deletes `CFBundleIconName` in the copy so the tinted `.icns` is used. `lib/color.js tint` repaints every PNG of the iconset with the chosen color and a soft shade, then `iconutil` rebuilds the `.icns`:
 
-1. **Sample.** The source icon (always the original, never an already tinted one) is scaled to 128 px and its dominant color `(Hs, Ss, Vs)` is taken: pixels with saturation and value of at least 0.2 vote by `s*v` in a 36-bin hue histogram, and the winning bin's neighborhood is averaged. Nothing is hardcoded, so a future Claude icon refresh does not break the colors.
-2. **Map in HSV.** The target `(Ht, St, Vt)` comes from the stored `PROFILE_COLOR`. Every pixel goes to `h' = h + (Ht - Hs)`, `s' = clamp(s * St / Ss)`, `v' = clamp(v * Vt / Vs)`, blended with the original by `w = smoothstep(0.06, 0.22, s)`, so the nearly white glyph and the anti-aliased edges keep their colors. Grey and black targets (`St` near 0) work: saturated pixels turn grey, the glyph stays white.
-3. **Calibrate.** Clamping at `s = 1` and the blend make the plain ratios fall a little short, especially for very saturated targets. The scales are therefore refined for up to 12 rounds by running the real pipeline on a 33-step lookup table and measuring the dominant color of the result, until hue, saturation and value are within 0.003 of the target. The measurement pairs each result pixel with the source pixel that voted for the dominant color, so it also works for greys.
-4. **Apply.** The final 64x64x64 `CIColorCube` table is built in JXA (float data passed to CoreImage as base64-decoded `NSData`) and applied to each PNG in sRGB: `CILinearToSRGBToneCurve`, `CIColorCube`, `CISRGBToneCurveToLinear`, because CoreImage works in linear light by default.
+1. **Measure the shade.** The source icon (always the original, never an already tinted one) is scaled to 128 px. The colored square is found as the first and last row whose middle columns are almost all saturated pixels. The mean color of a band near its top and of one near its bottom (3% to 9% of its height from each edge, middle 40% of the width, so the glyph is never sampled) gives the shade `A = 1 - Ybottom / Ytop`, where `Y` is the sRGB luma. The original gradient is a saturation ramp at constant HSV value, so the luma is what measures the darkening. For the current icon `A` is about 0.074. It is clamped to 0..0.3 and measured at run time, so a future icon refresh does not break the colors.
+2. **Flat color.** Each pixel is mapped to exactly the chosen color with the weight `w = smoothstep(0.06, 0.22, s)` of its saturation `s`, and blended with the original by `1 - w`, so the nearly white glyph and the anti-aliased edges keep their colors. Grey and black targets work: the glyph stays white. This is a 64x64x64 `CIColorCube`, built in JXA (float data passed to CoreImage as base64-decoded `NSData`). A second cube with the same loop turns `w` into a mask of the colored region.
+3. **Shade.** A `CILinearGradient` from black at alpha `A` at the bottom of the colored square to clear at its top is composited over the flat image and applied only through the mask (`CIBlendWithMask`), so the glyph is not darkened. The top of the icon is therefore exactly the chosen color and the bottom is about 7% darker, like the original.
+4. **Color space.** All of it runs in sRGB (`CILinearToSRGBToneCurve` before, `CISRGBToneCurveToLinear` after), because CoreImage works in linear light by default.
 
-The whole iconset takes a few seconds. The dominant color of the result is within about 4/255 per channel of the requested color; an extremely saturated target such as `#f5b000` is the worst case because edge pixels blend with the white glyph.
+The whole iconset takes about a second. The top of the colored region is within about 1/255 per channel of the requested color (the shade is already about 0.4% at 6% of the way down). The mean color of the whole icon is about 4% darker than the requested color.
 
 ### 10. Launching a copy takes over `claude://`
 
@@ -121,9 +121,22 @@ Spotlight and Raycast list every app they index, so a copy next to its launcher 
 4. `codesign --verify --deep --strict` at the new path. If it passed before the move and fails after, the copy is moved back and the command stops;
 5. `lsregister -f` the new path, `lsregister -u` the old one;
 6. removes the old launcher (only when its bundle ID is `<copy bundle ID>.launcher`; anything else is left alone with a warning);
-7. updates `PROFILE_APP` and `PROFILE_LAUNCHER`, refreshes `rules.tsv`, builds the new launcher at `/Applications/Claude <Name>.app` with the profile's resolved identity (never ad-hoc over an identity), and restarts the Dock unless run by `auto`.
+7. updates `PROFILE_APP` and `PROFILE_LAUNCHER`, refreshes `rules.tsv`, builds the new launcher at `/Applications/Claude <Name>.app` with the profile's resolved identity (never ad-hoc over an identity), and, unless run by `auto`, runs the Dock fix described below (which also restarts the Dock).
 
-The old Dock item pointed at the removed launcher, so the user must re-pin it. `check` warns about the old layout and fails if the launcher path is the copy itself (building a launcher there would delete the copy; `build_launcher` and `remove` refuse that case too). `remove` also deletes `APPS_DIR` when it is left empty.
+The Dock keeps a bookmark for each pinned app, so a pin of the copy follows it into `APPS_DIR`, and a pin of the removed `… Launcher.app` goes dead. `check` warns about the old layout and fails if the launcher path is the copy itself (building a launcher there would delete the copy; `build_launcher` and `remove` refuse that case too). `remove` also deletes `APPS_DIR` when it is left empty.
+
+### Dock pins
+
+A pinned app copy opens bare (on the main profile) when it is closed, so only the launcher belongs in the Dock. `dock <slug> fix` reads `persistent-apps` from `defaults export com.apple.dock -` into a temp plist and compares the decoded `tile-data:file-data:_CFURLString` of each entry with the profile's paths:
+
+- a pin of the copy is removed (replaced by the launcher when the launcher is not pinned yet);
+- a pin of the old `… Launcher.app` is repointed to the launcher, or removed when the launcher is already pinned;
+- a launcher pin whose `bundle-identifier` is not the launcher's (it was created while that path held the copy) is replaced by a fresh tile, so a stale bookmark cannot lead back to the copy;
+- with none of them pinned nothing changes unless `--pin` appends a launcher tile.
+
+New tiles are minimal (`file-data` URL, `file-label`, `tile-type`); the Dock fills in the rest. Edits use `plutil` on the temp plist and are validated (`plutil -lint`, entry count) before the original export is saved as `dock-backup-<timestamp>.plist` (under `~/Library/Application Support/claude-profiles`, or `$CLAUDE_PROFILES_HOME/backups` when that variable is set). The result goes back with `defaults import com.apple.dock` and `killall Dock`. `show --plain` reports the state as a `dock` row (`ok`, `copy_pinned`, `launcher_missing`, `old_launcher_pinned`, or `-` without a desktop app) and `check` warns for the two fixable ones. `remove` drops every pin of the removed launcher and copy.
+
+`CLAUDE_PROFILES_DOCK_PLIST=FILE` makes all of this read and write FILE instead of the real Dock and skips `killall Dock`; the tests use it.
 
 ## App architecture
 

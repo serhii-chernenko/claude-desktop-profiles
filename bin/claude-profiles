@@ -13,6 +13,8 @@
 #   build <slug>|--all                  (re)build the desktop copy and its launcher
 #   launcher <slug>                     rebuild only the launcher
 #   migrate-layout <slug> [--yes] [--plain]   move the app copy into the hidden apps dir; the launcher becomes "Claude <Name>"
+#   dock <slug> fix [--yes] [--dry-run] [--pin]   keep only the launcher pinned in the Dock: drop pins of the app copy,
+#                                       repoint a dead "... Launcher.app" pin; --pin adds the launcher when nothing is pinned
 #   resign <slug>                       re-sign only the outer bundle and the launcher with the resolved identity
 #   set <slug> sign-identity NAME|--clear   pin the signing identity of one profile
 #   recolor <slug> [--color '#hex'|--hue DEG|--pick-color]
@@ -44,7 +46,8 @@
 # Layout: the copy lives in APPS_DIR (config.env, default /Applications/.claude-profiles, hidden from search);
 # the launcher lives in /Applications and is named like the profile ("Claude <Name>").
 # Test overrides: CLAUDE_PROFILES_AGENTS_DIR (LaunchAgents dir), CLAUDE_PROFILES_APPS_DIR (overrides APPS_DIR),
-# CLAUDE_PROFILES_LAUNCHER_DIR (launcher dir, default /Applications).
+# CLAUDE_PROFILES_LAUNCHER_DIR (launcher dir, default /Applications), CLAUDE_PROFILES_DOCK_PLIST (a plist file that
+# `dock`, `show`, `check`, `migrate-layout` and `remove` read and write instead of the real Dock; the Dock is not restarted).
 #
 setopt extended_glob
 set -euo pipefail
@@ -860,6 +863,271 @@ EOF
   "$LSREG" -f "$L" >/dev/null 2>&1 || true
 }
 
+dock_read() {
+  local dest=$1
+  if [[ -n ${CLAUDE_PROFILES_DOCK_PLIST:-} ]]; then
+    [[ -r $CLAUDE_PROFILES_DOCK_PLIST ]] || return 1
+    cp -- "$CLAUDE_PROFILES_DOCK_PLIST" "$dest"
+  else
+    defaults export com.apple.dock - > "$dest" 2>/dev/null
+  fi
+  plutil -lint "$dest" >/dev/null 2>&1
+}
+
+dock_restart() {
+  [[ -n ${CLAUDE_PROFILES_DOCK_PLIST:-} ]] || killall Dock 2>/dev/null || true
+}
+
+dock_write() {
+  local src=$1
+  if [[ -n ${CLAUDE_PROFILES_DOCK_PLIST:-} ]]; then
+    cp -- "$src" "$CLAUDE_PROFILES_DOCK_PLIST"
+    return
+  fi
+  defaults import com.apple.dock "$src" || return 1
+  dock_restart
+}
+
+dock_backup_dir() {
+  if [[ -n ${CLAUDE_PROFILES_HOME:-} ]]; then
+    print -r -- "$CP_HOME/backups"
+  else
+    print -r -- "$HOME/Library/Application Support/claude-profiles"
+  fi
+}
+
+dock_backup() {
+  local source_file=$1 dir stamp target n=1
+  dir=$(dock_backup_dir)
+  mkdir -p -- "$dir"
+  stamp=$(strftime '%Y%m%d-%H%M%S' $EPOCHSECONDS)
+  target=$dir/dock-backup-$stamp.plist
+  while [[ -e $target ]]; do
+    n=$(( n + 1 ))
+    target=$dir/dock-backup-$stamp-$n.plist
+  done
+  cp -- "$source_file" "$target"
+  print -r -- "$target"
+}
+
+dock_url_path() {
+  local u=$1 d
+  [[ $u == file://* ]] || return 0
+  u=${u#file://}
+  u=${u#localhost}
+  d=${u//\%/\\x}
+  d=$(printf '%b' "$d")
+  print -r -- "${d%/}"
+}
+
+dock_encode_path() {
+  local hex byte char out=""
+  hex=$(print -rn -- "$1" | od -An -v -tx1)
+  for byte in ${=hex}; do
+    char=""
+    if (( 16#$byte < 128 )); then
+      char=$(printf "\\x$byte")
+    fi
+    if [[ -n $char && $char == [A-Za-z0-9/._~-] ]]; then
+      out+=$char
+    else
+      out+="%${(U)byte}"
+    fi
+  done
+  print -r -- "$out"
+}
+
+dock_tile_xml() {
+  local app=$1 label=$2 url
+  url="file://$(dock_encode_path "$app")/"
+  print -r -- "<dict><key>tile-data</key><dict><key>file-data</key><dict><key>_CFURLString</key><string>$url</string><key>_CFURLStringType</key><integer>15</integer></dict><key>file-label</key><string>$(xml_escape "$label")</string></dict><key>tile-type</key><string>file-tile</string></dict>"
+}
+
+dock_same_path() {
+  [[ ${(L)1%/} == ${(L)2%/} ]]
+}
+
+dock_profile_args() {
+  DOCK_COPY=$PROFILE_APP
+  DOCK_LAUNCHER=$PROFILE_LAUNCHER
+  DOCK_LID=$(launcher_id)
+  DOCK_LABEL=${PROFILE_LAUNCHER:t:r}
+  DOCK_OLDS=()
+  local candidate
+  for candidate in "$LAUNCHER_DIR/${PROFILE_APP:t:r} Launcher.app" "${PROFILE_APP%.app} Launcher.app" "$@"; do
+    dock_same_path "$candidate" "$PROFILE_LAUNCHER" && continue
+    dock_same_path "$candidate" "$PROFILE_APP" && continue
+    (( ${DOCK_OLDS[(Ie)$candidate]} )) || DOCK_OLDS+=( "$candidate" )
+  done
+}
+
+dock_analyze() {
+  local work=$1 idx url bid pinned old
+  DA_COPY=() DA_OLD=() DA_LAUNCHER=() DA_STALE=()
+  while IFS=$'\t' read -r idx url bid; do
+    [[ -n $idx && $url != - ]] || continue
+    pinned=$(dock_url_path "$url")
+    [[ -n $pinned ]] || continue
+    if dock_same_path "$pinned" "$DOCK_COPY"; then
+      DA_COPY+=( $idx )
+    elif dock_same_path "$pinned" "$DOCK_LAUNCHER"; then
+      DA_LAUNCHER+=( $idx )
+      if [[ $bid != - && ${(L)bid} != ${(L)DOCK_LID} ]]; then
+        DA_STALE+=( $idx )
+      fi
+    else
+      for old in $DOCK_OLDS; do
+        if dock_same_path "$pinned" "$old"; then
+          DA_OLD+=( $idx )
+          break
+        fi
+      done
+    fi
+  done < <(plutil -p "$work" | awk '
+    function flush() { if (idx != "") print idx "\t" (url == "" ? "-" : url) "\t" (bid == "" ? "-" : bid); idx = ""; url = ""; bid = "" }
+    /^  "persistent-apps" => \[/ { inapps = 1; next }
+    inapps && /^  \]/ { flush(); inapps = 0; next }
+    inapps && /^    [0-9]+ => \{/ { flush(); idx = $1; next }
+    inapps && /"_CFURLString" =>/ { s = $0; sub(/^.*"_CFURLString" => "/, "", s); sub(/"$/, "", s); url = s }
+    inapps && /"bundle-identifier" =>/ { s = $0; sub(/^.*"bundle-identifier" => "/, "", s); sub(/"$/, "", s); bid = s }
+    END { flush() }')
+}
+
+dock_state() {
+  if (( ${#DA_COPY} || ${#DA_STALE} )); then
+    print -r -- copy_pinned
+  elif (( ${#DA_OLD} )); then
+    print -r -- old_launcher_pinned
+  elif (( ! ${#DA_LAUNCHER} )); then
+    print -r -- launcher_missing
+  else
+    print -r -- ok
+  fi
+}
+
+dock_profile_state() {
+  local work=$TMP/dock-state.plist
+  dock_profile_args
+  dock_read "$work" || { print -r -- -; return 0; }
+  dock_analyze "$work"
+  dock_state
+}
+
+dock_sync() {
+  local mode=$1 dry=$2 pin=$3 ask=$4
+  local work=$TMP/dock-before.plist edited=$TMP/dock-after.plist
+  local -a replace_idx remove_idx plan
+  local idx need_launcher count_before count_after expected
+  DOCK_CHANGED=0
+  if ! dock_read "$work"; then
+    warn "Could not read the Dock preferences; the Dock was left as it is."
+    return 1
+  fi
+  dock_analyze "$work"
+  need_launcher=$(( ${#DA_LAUNCHER} == 0 ))
+  if [[ $mode == purge ]]; then
+    for idx in ${(on)${DA_COPY} ${DA_OLD} ${DA_LAUNCHER}}; do
+      remove_idx+=( $idx )
+      plan+=( "remove the Dock pin at position $idx" )
+    done
+  else
+    for idx in $DA_STALE; do
+      replace_idx+=( $idx )
+      plan+=( "refresh the launcher pin at position $idx (it carried the identity of the app copy)" )
+    done
+    for idx in $DA_OLD; do
+      if (( need_launcher )); then
+        need_launcher=0
+        replace_idx+=( $idx )
+        plan+=( "point the old launcher pin at position $idx to $(tilde "$DOCK_LAUNCHER")" )
+      else
+        remove_idx+=( $idx )
+        plan+=( "remove the old launcher pin at position $idx (the launcher is already pinned)" )
+      fi
+    done
+    for idx in $DA_COPY; do
+      if (( need_launcher )); then
+        need_launcher=0
+        replace_idx+=( $idx )
+        plan+=( "replace the app copy pin at position $idx with $(tilde "$DOCK_LAUNCHER")" )
+      else
+        remove_idx+=( $idx )
+        plan+=( "remove the app copy pin at position $idx ($(tilde "$DOCK_COPY"))" )
+      fi
+    done
+    if (( need_launcher && pin )); then
+      plan+=( "pin $(tilde "$DOCK_LAUNCHER")" )
+    fi
+  fi
+  if (( ! ${#plan} )); then
+    say "Dock: nothing to change."
+    return 0
+  fi
+  local line
+  say "Dock plan:"
+  for line in $plan; do
+    say "  - $line"
+  done
+  if (( dry )); then
+    say "Dry run: the Dock was not changed."
+    return 0
+  fi
+  if (( ask )); then
+    confirm "Apply these changes to the Dock (it restarts)?" || { say "Cancelled."; return 0; }
+  fi
+  cp -- "$work" "$edited"
+  local tile
+  tile=$(dock_tile_xml "$DOCK_LAUNCHER" "$DOCK_LABEL")
+  for idx in $replace_idx; do
+    plutil -insert "persistent-apps.$idx" -xml "$tile" "$edited" && plutil -remove "persistent-apps.$(( idx + 1 ))" "$edited" || { warn "Could not edit the Dock preferences; nothing was changed."; return 1; }
+  done
+  for idx in ${(On)remove_idx}; do
+    plutil -remove "persistent-apps.$idx" "$edited" || { warn "Could not edit the Dock preferences; nothing was changed."; return 1; }
+  done
+  if (( need_launcher && pin )); then
+    plutil -insert persistent-apps -xml "$tile" -append "$edited" || { warn "Could not edit the Dock preferences; nothing was changed."; return 1; }
+  fi
+  count_before=$(plutil -extract persistent-apps raw -o - "$work")
+  count_after=$(plutil -extract persistent-apps raw -o - "$edited" 2>/dev/null || print -r -- -1)
+  expected=$(( count_before - ${#remove_idx} + (need_launcher && pin ? 1 : 0) ))
+  if ! plutil -lint "$edited" >/dev/null 2>&1 || [[ $count_after != "$expected" ]]; then
+    warn "The edited Dock preferences failed validation; nothing was changed."
+    return 1
+  fi
+  local backup
+  backup=$(dock_backup "$work")
+  dock_write "$edited" || { warn "Could not write the Dock preferences. The original is saved at $(tilde "$backup")."; return 1; }
+  DOCK_CHANGED=1
+  say "Dock updated. Backup of the previous Dock: $(tilde "$backup")"
+}
+
+cmd_dock() {
+  local target=${1:-} action=${2:-} dry=0 pin=0
+  local usage_text="dock <slug> fix [--yes] [--dry-run] [--pin]"
+  [[ -n $target && $action == fix ]] || usage_error "$usage_text"
+  shift 2
+  while (( $# )); do
+    case $1 in
+      --yes|-y) YES=1; shift ;;
+      --dry-run) dry=1; shift ;;
+      --pin) pin=1; shift ;;
+      --plain) PLAIN=1; shift ;;
+      *) usage_error "$usage_text" ;;
+    esac
+  done
+  setup_colors
+  profile_load "$target"
+  (( PROFILE_DESKTOP )) || die "Profile \"$SLUG\" has no desktop app."
+  if same_path "$PROFILE_LAUNCHER" "$PROFILE_APP"; then
+    die "The launcher path of \"$SLUG\" is the copy itself ($PROFILE_LAUNCHER). Fix the profile paths with: claude-profiles migrate-layout $SLUG"
+  fi
+  if (( ! dry )) && [[ ! -d $PROFILE_LAUNCHER ]]; then
+    die "Launcher missing: $PROFILE_LAUNCHER. Build it first: claude-profiles launcher $SLUG"
+  fi
+  dock_profile_args
+  dock_sync fix "$dry" "$pin" 1 || exit 1
+}
+
 report_layout_blockers() {
   local i state t=$'\t'
   if (( PLAIN )); then
@@ -975,12 +1243,20 @@ migrate_layout() {
   regen_rules
   if (( have_old || have_new )); then
     build_launcher "$(copy_icns_path "$new_app")"
-    if (( ! IS_AUTO )); then
-      killall Dock 2>/dev/null || true
-    fi
   fi
   say "New layout: copy $new_app, launcher $new_launcher"
-  if (( pin_note )); then
+  local dock_handled=0
+  if (( ! IS_AUTO )); then
+    dock_profile_args "$old_launcher"
+    DOCK_CHANGED=0
+    if dock_sync fix 0 0 0; then
+      dock_handled=1
+    fi
+    if (( (have_old || have_new) && ! DOCK_CHANGED )); then
+      dock_restart
+    fi
+  fi
+  if (( pin_note && ! dock_handled )); then
     say "Note: re-pin '${new_launcher:t:r}' in the Dock. The old Dock item pointed at the removed launcher: remove it, then drag $new_launcher into the Dock."
   fi
   if (( pin_note && IS_AUTO )); then
@@ -1507,6 +1783,7 @@ cmd_show() {
       print -r -- "app${t}$SOURCE_APP"
       print -r -- "launcher${t}-"
       print -r -- "layout${t}-"
+      print -r -- "dock${t}-"
       print -r -- "bundle_id${t}$(src_id)"
       print -r -- "data_dir${t}$MAIN_DATA_DIR"
       print -r -- "config_dir${t}$MAIN_CONFIG_DIR"
@@ -1521,9 +1798,12 @@ cmd_show() {
   fi
   profile_load "$slug"
   if (( PLAIN )); then
-    local app=$PROFILE_APP launcher=$PROFILE_LAUNCHER bundle_id=$PROFILE_BUNDLE_ID data_dir=$PROFILE_DATA_DIR layout d
+    local app=$PROFILE_APP launcher=$PROFILE_LAUNCHER bundle_id=$PROFILE_BUNDLE_ID data_dir=$PROFILE_DATA_DIR layout dock d
     layout=$(layout_of_profile)
-    if (( ! PROFILE_DESKTOP )); then
+    dock=-
+    if (( PROFILE_DESKTOP )); then
+      dock=$(dock_profile_state)
+    else
       app=- launcher=- bundle_id=- data_dir=- layout=-
     fi
     print -r -- "slug${t}$SLUG"
@@ -1535,6 +1815,7 @@ cmd_show() {
     print -r -- "app${t}$app"
     print -r -- "launcher${t}$launcher"
     print -r -- "layout${t}$layout"
+    print -r -- "dock${t}$dock"
     print -r -- "bundle_id${t}$bundle_id"
     print -r -- "data_dir${t}$data_dir"
     print -r -- "config_dir${t}$PROFILE_CONFIG_DIR"
@@ -1568,6 +1849,12 @@ cmd_show() {
     else
       say "layout      hidden"
     fi
+    local dock_now
+    dock_now=$(dock_profile_state)
+    case $dock_now in
+      copy_pinned|old_launcher_pinned) say "dock        $dock_now (run: claude-profiles dock $SLUG fix)" ;;
+      *) say "dock        $dock_now" ;;
+    esac
   fi
   say "bundle_id   $PROFILE_BUNDLE_ID"
   say "data_dir    $PROFILE_DATA_DIR"
@@ -2087,6 +2374,10 @@ cmd_check() {
   else
     ok "layout: the copy is hidden in ${DST:h}; '${PROFILE_LAUNCHER:t:r}' is the only entry in search"
   fi
+  case $(dock_profile_state) in
+    copy_pinned) warnl "the app copy is pinned in the Dock: opening it while it is closed starts it on the MAIN profile. Fix: claude-profiles dock $SLUG fix" ;;
+    old_launcher_pinned) warnl "the Dock still pins the old launcher, which no longer exists. Fix: claude-profiles dock $SLUG fix" ;;
+  esac
   if [[ -n $(ls -A "$DATA" 2>/dev/null) ]]; then
     ok "data dir is populated ($DATA)"
   else
@@ -2335,6 +2626,8 @@ cmd_remove() {
     if same_path "${PROFILE_APP:h}" "$APPS_DIR"; then
       rmdir -- "$APPS_DIR" 2>/dev/null || true
     fi
+    dock_profile_args
+    dock_sync purge 0 0 0 || true
   fi
   if (( delete_data )) && [[ -e $PROFILE_DATA_DIR ]]; then
     rm -rf -- "$PROFILE_DATA_DIR"
@@ -3644,6 +3937,7 @@ main() {
     build) cmd_build "$@" ;;
     launcher) cmd_launcher "$@" ;;
     migrate-layout) cmd_migrate_layout "$@" ;;
+    dock) cmd_dock "$@" ;;
     resign) cmd_resign "$@" ;;
     set) cmd_set "$@" ;;
     recolor) cmd_recolor "$@" ;;
