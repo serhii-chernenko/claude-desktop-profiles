@@ -38,15 +38,21 @@ Requires macOS 13 or newer and an installed `/Applications/Claude.app`. The rele
 | --- | --- |
 | App (GUI + bundled CLI) | Download the DMG, drag **Claude Profiles** to Applications |
 | CLI only | `zsh install.sh` (links `bin/claude-profiles` into `~/.local/bin`; override with `PREFIX=/some/dir`) |
-| CLI from the app | In **Claude Profiles**, choose **Install command-line tool** |
+| CLI from the app | In **Claude Profiles**, choose **Install command-line tool** (copies the tool to `~/.local/share/claude-profiles` and links `~/.local/bin/claude-profiles`; run it again after updating the app) |
 
-### Gatekeeper note
+### First launch (Gatekeeper)
 
-The app is signed ad-hoc, not notarized, so macOS blocks the first launch. Either right-click the app, choose **Open**, then **Open** again; or remove the quarantine flag:
+The app is ad-hoc signed and not notarized, so macOS blocks the first launch. This is a one-time approval for this app only; you do not need to disable Gatekeeper.
 
-```sh
-xattr -dr com.apple.quarantine "/Applications/Claude Profiles.app"
-```
+1. Drag **Claude Profiles.app** from the disk image to **Applications** and open it from there (not from the disk image).
+2. When macOS says it cannot verify the app, click **Done**.
+3. Open **System Settings → Privacy & Security**, scroll to **Security** and click **Open Anyway** for Claude Profiles. Then click **Open** and enter your password if asked. The button stays available for [about an hour after a blocked launch](https://support.apple.com/guide/mac-help/open-a-mac-app-from-an-unknown-developer-mh40616/mac); if it is missing, try opening the app again and return to that page.
+
+On macOS 15 and later, right-click → **Open** no longer bypasses this check. Advanced alternative: `xattr -dr com.apple.quarantine "/Applications/Claude Profiles.app"`.
+
+Verify the download against `SHA256SUMS.txt` from the same release: `shasum -a 256 -c SHA256SUMS.txt`.
+
+The Claude copies and launchers that the tool builds on your Mac are not downloaded, so they are not quarantined and open without this step.
 
 ## Quick start
 
@@ -92,8 +98,8 @@ Every interactive prompt has a flag equivalent. `--yes` means "never prompt" and
 | Check | `check <slug>` |
 | Link sign-in (claude://, desktop profiles) | `link <slug>` or `link main` |
 | Remove | `remove <slug> [--delete-data] [--delete-config]` |
-| Set up auto-rebuild & stable signing | `setup` (opens Terminal) |
-| Install command-line tool | symlink into `~/.local/bin` |
+| Set up auto-rebuild & stable signing | installs the command-line tool, then runs `setup` from `~/.local/share/claude-profiles` in Terminal (the LaunchAgent points there, not into the app) |
+| Install command-line tool | copy into `~/.local/share/claude-profiles` (without the download quarantine flag) + symlink in `~/.local/bin` |
 
 ## Updates and auto-rebuild
 

@@ -19,19 +19,12 @@ jobs:
           zsh scripts/build-app.sh
           zsh scripts/build-dmg.sh
 
-      - name: Write the SHA-256 checksum
-        working-directory: dist
-        run: |
-          for dmg in *.dmg; do
-            shasum -a 256 "$dmg" > "$dmg.sha256"
-          done
-
       - name: Create the release or update its assets
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           if gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            gh release upload "$GITHUB_REF_NAME" dist/*.dmg dist/*.dmg.sha256 --clobber --repo "$GITHUB_REPOSITORY"
+            gh release upload "$GITHUB_REF_NAME" dist/*.dmg dist/SHA256SUMS.txt --clobber --repo "$GITHUB_REPOSITORY"
           else
-            gh release create "$GITHUB_REF_NAME" dist/*.dmg dist/*.dmg.sha256 --title "$GITHUB_REF_NAME" --generate-notes --repo "$GITHUB_REPOSITORY"
+            gh release create "$GITHUB_REF_NAME" dist/*.dmg dist/SHA256SUMS.txt --title "$GITHUB_REF_NAME" --generate-notes --repo "$GITHUB_REPOSITORY"
           fi

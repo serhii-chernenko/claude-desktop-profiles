@@ -22,10 +22,7 @@ property deleteData : "Also delete desktop data (login, local state)"
 property deleteConfig : "Also delete CLI config (settings, history)"
 property deleteBoth : "Delete both"
 
-property cliPath : ""
-
 on run
-	set cliPath to POSIX path of ((path to me as text) & "Contents:Resources:bin:claude-profiles")
 	set menuItems to {menuCreate, menuColor, menuRebuild, menuCheck, menuLink, menuRemove, menuSetup, menuInstallCli, menuReadme}
 	repeat
 		set picked to choose from list menuItems with title appTitle with prompt "What do you want to do?" OK button name "Continue" cancel button name "Quit"
@@ -57,8 +54,12 @@ on run
 	end repeat
 end run
 
+on cliPath()
+	return POSIX path of ((path to me as text) & "Contents:Resources:bin:claude-profiles")
+end cliPath
+
 on cliCommand(arguments)
-	return "/bin/zsh " & quoted form of cliPath & " " & arguments
+	return "/bin/zsh " & quoted form of cliPath() & " " & arguments
 end cliCommand
 
 on runAction(arguments)
@@ -421,17 +422,34 @@ end removeProfile
 
 on openSetupInTerminal()
 	display dialog "Setup creates a local code-signing identity, trusts it, and installs one LaunchAgent that rebuilds profiles after Claude updates. It asks for your login password in Terminal, so it runs there." with title appTitle buttons {"Cancel", "Open Terminal"} default button "Open Terminal" cancel button "Cancel"
+	installCliCopy()
 	tell application "Terminal"
 		activate
-		do script my cliCommand("setup")
+		do script "/bin/zsh " & quoted form of installedCliPath() & " setup"
 	end tell
 end openSetupInTerminal
 
-on installCommandLineTool()
+on installedCliPath()
+	return homePath() & "/.local/share/claude-profiles/bin/claude-profiles"
+end installedCliPath
+
+on installCliCopy()
+	set resourcesDir to POSIX path of ((path to me as text) & "Contents:Resources:")
+	set shareDir to homePath() & "/.local/share/claude-profiles"
 	set binDir to homePath() & "/.local/bin"
 	set linkPath to binDir & "/claude-profiles"
-	do shell script "/bin/mkdir -p " & quoted form of binDir & " && /bin/ln -sfn " & quoted form of cliPath & " " & quoted form of linkPath
+	set copyCommand to "/bin/rm -rf " & quoted form of (shareDir & ".new") & " && /bin/mkdir -p " & quoted form of (shareDir & ".new") & " " & quoted form of binDir
+	repeat with itemName in {"bin", "lib", "VERSION"}
+		set copyCommand to copyCommand & " && /usr/bin/ditto --noqtn " & quoted form of (resourcesDir & itemName) & " " & quoted form of (shareDir & ".new/" & itemName)
+	end repeat
+	set copyCommand to copyCommand & " && /bin/chmod -R go-w " & quoted form of (shareDir & ".new") & " && /bin/rm -rf " & quoted form of shareDir & " && /bin/mv " & quoted form of (shareDir & ".new") & " " & quoted form of shareDir & " && /bin/ln -sfn " & quoted form of installedCliPath() & " " & quoted form of linkPath
+	do shell script copyCommand
+	return linkPath
+end installCliCopy
+
+on installCommandLineTool()
+	set linkPath to installCliCopy()
 	set initLine to "eval \"$(claude-profiles shell-init zsh)\""
-	set reply to display dialog "Installed: " & tildePath(linkPath) & return & return & "Make sure ~/.local/bin is on your PATH. To get claude-<profile> aliases and folder-based profile selection, add this line to ~/.zshrc:" & return & return & initLine & return & return & "The link points into this app, so re-run this action if you move it." with title appTitle buttons {"Close", "Copy shell-init line"} default button "Close"
+	set reply to display dialog "Installed: " & tildePath(linkPath) & " → ~/.local/share/claude-profiles" & return & return & "Make sure ~/.local/bin is on your PATH. To get claude-<profile> aliases and folder-based profile selection, add this line to ~/.zshrc:" & return & return & initLine & return & return & "After updating this app, run this action again to update the command-line tool." with title appTitle buttons {"Close", "Copy shell-init line"} default button "Close"
 	if button returned of reply is "Copy shell-init line" then set the clipboard to initLine
 end installCommandLineTool
