@@ -145,6 +145,8 @@ enum PlainParser {
             case "cli_installed":
                 status.cliInstalled = flag(column(1))
                 status.cliPath = optional(column(2))
+            case "cli_current":
+                status.cliCurrent = flag(column(1))
             case "identity":
                 status.identityName = optional(column(1))
                 status.identityPresent = flag(column(2))

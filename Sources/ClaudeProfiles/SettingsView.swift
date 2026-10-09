@@ -58,18 +58,33 @@ struct SettingsView: View {
             ActionRow(title: "claude-profiles command",
                       caption: "Copies the tool bundled in this app to ~/.local/share/claude-profiles and links it into ~/.local/bin, for Terminal and the auto-rebuild agent.",
                       systemImage: "terminal") {
-                Button(status?.cliInstalled == true ? "Update" : "Install") {
+                Button(commandLineNeedsUpdate ? "Update" : "Install") {
                     Task { await model.installCLI() }
                 }
                 .disabled(model.isBusy || model.cliMissing)
             }
             LabeledContent("Status") {
-                StatusLabel(ok: status?.cliInstalled,
-                            text: status?.cliInstalled == true ? "Installed at \(tildePath(status?.cliPath ?? ""))" : "Not installed")
+                StatusLabel(ok: commandLineOK,
+                            text: commandLineStatusText)
             }
         } header: {
             Text("Command-line tool")
         }
+    }
+
+    private var commandLineOK: Bool? {
+        guard let installed = status?.cliInstalled else { return nil }
+        return installed && status?.cliCurrent != false
+    }
+
+    private var commandLineNeedsUpdate: Bool {
+        status?.cliInstalled == true || status?.cliCurrent == false
+    }
+
+    private var commandLineStatusText: String {
+        guard status?.cliInstalled == true else { return "Not installed" }
+        let location = "Installed at \(tildePath(status?.cliPath ?? ""))"
+        return status?.cliCurrent == false ? location + ", out of date: press Update" : location
     }
 
     private var shellSection: some View {

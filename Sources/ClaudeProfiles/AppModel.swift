@@ -59,6 +59,8 @@ final class AppModel: ObservableObject {
 
     let runner: CLIRunner?
     private(set) var nextLogID = 0
+    private var lastAutoRefresh = Date.distantPast
+    private static let autoRefreshMinimumInterval: TimeInterval = 2
 
     init(runner: CLIRunner? = CLILocator.bundledCLI().map { CLIRunner(script: $0) }) {
         self.runner = runner
@@ -108,6 +110,33 @@ final class AppModel: ObservableObject {
             await loadDetails(for: other.slug)
         }
         isRefreshing = false
+    }
+
+    func autoRefresh() async {
+        guard runner != nil, hasLoaded, !isBusy, !isRefreshing else { return }
+        guard Date().timeIntervalSince(lastAutoRefresh) >= Self.autoRefreshMinimumInterval else { return }
+        lastAutoRefresh = Date()
+        await refreshReadOnlyState()
+    }
+
+    private func refreshReadOnlyState() async {
+        guard let runner else { return }
+        isRefreshing = true
+        defer { isRefreshing = false }
+        let selectedSlug = selectedProfile?.slug
+        var pieces: [RefreshPiece] = []
+        await withTaskGroup(of: RefreshPiece.self) { group in
+            group.addTask { .list(await runner.run(["list", "--plain"], timeout: 60)) }
+            group.addTask { .status(await runner.run(["status", "--plain"], timeout: 60)) }
+            for await piece in group {
+                pieces.append(piece)
+            }
+        }
+        guard !isBusy else { return }
+        pieces.forEach(apply)
+        if let selectedSlug, profile(selectedSlug) != nil {
+            await loadDetails(for: selectedSlug)
+        }
     }
 
     private enum RefreshPiece: Sendable {

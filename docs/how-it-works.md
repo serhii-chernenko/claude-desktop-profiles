@@ -170,6 +170,10 @@ Claude records `localPairingDisabledReason = "userData relocated"` whenever the 
 
 **Checks.** `check` in self mode verifies the boot entry (present, integrity hash, wired as `main`, current version, baked data and config dirs), that the plist hash equals the recomputed header hash, open files of every process of the copy (`lsof`: files in the profile data dir, none in the main data dir with its Crashpad folder, `~/.claude` or `~/Library/Logs/Claude`), `CLAUDE_CONFIG_DIR` in the environment, the Launch Services PID and the `claude://` handler. `stale_reason` treats a missing or older boot entry, a plist hash mismatch and baked dirs that differ from the profile as stale.
 
+**Recovery.** The boot file is the profile's source of truth, so a lost profile `.env` is not fatal. `scan` finds self-mode copies in `/Applications` by reading the boot entry inside their `app.asar` (`asar_boot_state`) and reports the baked data and config dirs; `adopt --app PATH` then registers the copy again in self mode without rebuilding it.
+
+**Installed copy.** The LaunchAgent runs the copy made by `install-cli`, so it can lag behind the checkout. `check` and `status` compare a SHA-256 over the sorted files of `bin/`, `lib/` and `VERSION` of the running tool with the installed one and warn on a difference (`cli_current` in `status --plain`).
+
 **Keychain prompt.** A copy that is not yet allowed to read "Claude Safe Storage" (ad-hoc signed, or before the first **Always Allow**) waits at startup on the Keychain prompt. While it is open the app does not handle Quit or `SIGTERM`. This is the same in both modes.
 
 ### Dock pins

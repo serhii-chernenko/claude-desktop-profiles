@@ -89,7 +89,7 @@ Every interactive prompt has a flag equivalent. `--yes` means "never prompt" and
 | `show <slug> [--plain]` | Print one profile's settings. `--plain` prints `key<TAB>value` lines, then one `dir` line per folder. The `mode` line is `self` (one app, no launcher) or `launcher`; the `layout` line is `self`, `legacy` (copy and launcher both in `/Applications`) or `hidden` (copy in `APPS_DIR`); both are `-` for CLI-only profiles. In self mode `launcher` is `-` and `dock` is `ok`, `not_pinned` or `old_launcher_pinned` |
 | `projects <slug> list [--plain]` | Claude Code session history stored in the profile's config dir, by project folder. `--plain` rows: `project`, working directory, sessions, last used, `symlink` or `dir` |
 | `projects <slug> add [--mode symlink\|move\|copy] [--no-dir] [--yes] CWD...` | Bring the history of project folders into an **existing** profile (the same operation as `--link` on `new`). `symlink` shares it, `move` reassigns it, `copy` duplicates it. By default each folder is also added to the profile's folders; `--no-dir` skips that. Quit running Claude Code sessions in those projects first |
-| `status [--plain]` | Command-line tool install, signing identity, auto-rebuild agent, source app and the `claude://` handler, with the settings folder |
+| `status [--plain]` | Command-line tool install (and whether the installed copy matches the running one: `cli_current` row), signing identity, auto-rebuild agent, source app and the `claude://` handler, with the settings folder |
 | `install-cli [--from DIR] [--prefix DIR] [--share-dir DIR] [--bin-dir DIR]` | Copy the tool (without the quarantine flag) to `~/.local/share/claude-profiles` and link `~/.local/bin/claude-profiles` |
 | `legacy-agents [--plain]` | List other LaunchAgents that watch Claude.app or a profile copy (earlier hand-made setups) |
 | `legacy-agents disable LABEL [--yes]` | Unload one of them and rename its plist to `.disabled`; nothing is deleted |
@@ -137,6 +137,8 @@ Every interactive prompt has a flag equivalent. `--yes` means "never prompt" and
 
 **Self mode (the default): one app per profile.** The profile is `/Applications/Claude <Name>.app`, a copy of Claude.app with its own bundle ID (`com.anthropic.claudefordesktop.<slug>`), tinted icon and a small boot file inside its `app.asar`. The boot file points the app at the profile's data folder before Claude's own code starts, so there is nothing to pass on the command line and no launcher. Pin it to the Dock: the pin and the running app are one icon, and the Dock, Spotlight, Raycast, `claude://` links and login restore all open the right profile. The copy never takes over `claude://` from regular Claude. How the boot file works, and why it is safe: [docs/how-it-works.md](docs/how-it-works.md#13-self-mode-the-boot-file-inside-appasar).
 
+Self mode is the default for new and rebuilt profiles. A profile that already exists in launcher mode stays in launcher mode until you click **Move to New Layout** in the app or run `claude-profiles migrate-layout <slug>`; the auto-rebuild agent (`auto`) never converts it.
+
 **Launcher mode (the fallback).** Before self mode, and whenever a Claude build cannot be patched safely, each profile has two apps:
 
 | App | Path | Purpose |
@@ -147,6 +149,10 @@ Every interactive prompt has a flag equivalent. `--yes` means "never prompt" and
 While a launcher-mode profile runs, the Dock shows two icons (the pinned launcher and the running copy). `APPS_DIR` is a key in `~/.config/claude-profiles/config.env`.
 
 **Moving to self mode.** Run `claude-profiles migrate-layout <slug>` (or **Move to New Layout** in the app); a plain `build` does the same. Quit the profile first. The copy is rebuilt from the current Claude.app with the profile's signing identity, so with the identity from `setup` Keychain and privacy permissions carry over. It replaces the launcher at `/Applications/Claude <Name>.app`, the hidden copy (and the old `… Launcher.app` of very old installs) is removed, and your existing Dock pin is refreshed to point at the app. The data folder and history are not touched. It refuses while an old LaunchAgent references the copy or Claude.app: disable it first, see `legacy-agents`. `claude-profiles dock <slug> fix` repeats the Dock repair at any time; **Fix Dock** in the app appears when `check` would warn. To go back, run `claude-profiles build <slug> --mode launcher`.
+
+## After you pull or update the repo
+
+The LaunchAgent and the shell hook run the installed copy of the tool in `~/.local/share/claude-profiles`, not the files in your checkout or inside the app. After you pull the repo or update **Claude Profiles.app**, run `claude-profiles install-cli` (or press **Update** under Settings, Command-line tool) so the installed copy matches. `check` and `status` warn when it is out of date, and `status --plain` has a `cli_current` row (`0` when it differs).
 
 ## Updates and auto-rebuild
 
@@ -205,6 +211,8 @@ The `claude-profiles.bak` backups: when a project is linked, edited `.claude.jso
 
 **Keychain asks for "Claude Safe Storage".** Click **Always Allow**. With the stable signing identity from `setup` this happens once; with ad-hoc signing it happens after each rebuild. Until it is answered the app waits at startup and does not react to Quit; answer the prompt first.
 
+**The app seems frozen on first launch.** A Keychain dialog ("Claude Safe Storage") may be hidden behind other windows. Find it and click **Always Allow**; **Allow** only works once. Ad-hoc-signed copies (profiles built without `setup`) ask on every launch.
+
 **Keychain or permission prompts come back after `recolor` (or `check` says "mixed signature").** The outer app was signed ad-hoc while its helpers still carry a certificate, which changes the app's identity for macOS. Run `claude-profiles check <slug>`; if it names a mixed signature, unlock the login keychain and run `claude-profiles resign <slug>` (add `claude-profiles set <slug> sign-identity "<Something> Signing"` first if the certificate is not detected). `recolor` and `launcher` now refuse to create this state; `adopt` keeps the signature of the copy it registers.
 
 **The icon color differs from the one I picked.** The icon is painted with the picked color at the top and a soft shade toward the bottom, so the bottom is a little darker. Run `claude-profiles recolor <slug> --color '#hex'` once to re-apply it to a copy tinted by an older version.
@@ -236,6 +244,10 @@ The `claude-profiles.bak` backups: when a project is linked, edited `.claude.jso
 **`check` reports FAIL.** The message names the exact fix (usually: rebuild the app, quit the copy and use the launcher, or run `link main`).
 
 More background on every design decision is in [docs/how-it-works.md](docs/how-it-works.md).
+
+## What CI covers
+
+CI syntax-checks the zsh scripts, builds the app and runs `ClaudeProfiles --self-test`, which exercises the CLI against a temporary home. The runners have no Claude.app, so nothing in CI builds, patches or launches a real profile copy. The `app.asar` patch is validated on your machine at build time (`asar_validate`, then a verification of the patched archive), with an automatic fallback to launcher mode when a check fails.
 
 ## Uninstall
 

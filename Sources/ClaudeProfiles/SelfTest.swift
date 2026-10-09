@@ -122,8 +122,8 @@ enum SelfTest {
         let human = PlainParser.profileDetails("slug        work\ncolor       #3a7bd5 (hue shift 10, saturation x1)\napp         /A/Claude Work.app (built, 1.0)\ndirs        /a, /b")
         expect(human.value("color") == "#3a7bd5" && human.value("app") == "/A/Claude Work.app" && human.dirs == ["/a", "/b"], "show parser falls back to the human format")
 
-        let status = PlainParser.status("cli_installed\t1\t/h/.local/bin/claude-profiles\nidentity\tClaude Profiles Signing\t1\t0\nagent\tlabel\t1\nsource\t/Applications/Claude.app\t1.0\t1\nhandler\tclaude\tcom.example\nhome\t/h/.config/claude-profiles\nlater\tx")
-        expect(status.cliInstalled == true && status.identityUsable == false && status.agentLoaded == true && status.sourceTeamOK == true && status.home != nil, "status parser")
+        let status = PlainParser.status("cli_installed\t1\t/h/.local/bin/claude-profiles\ncli_current\t0\nidentity\tClaude Profiles Signing\t1\t0\nagent\tlabel\t1\nsource\t/Applications/Claude.app\t1.0\t1\nhandler\tclaude\tcom.example\nhome\t/h/.config/claude-profiles\nlater\tx")
+        expect(status.cliInstalled == true && status.cliCurrent == false && status.identityUsable == false && status.agentLoaded == true && status.sourceTeamOK == true && status.home != nil, "status parser")
 
         let shell = PlainParser.shellStatus("installed\t1\t/h/.zshrc\nconflict\t~/.zshrc:3: alias claude=x")
         expect(shell.installed && shell.conflicts == ["~/.zshrc:3: alias claude=x"], "shell-init status parser")
@@ -257,7 +257,7 @@ enum SelfTest {
             let installed = home + "/.local/share/claude-profiles/bin/claude-profiles"
             expect(fileManager.fileExists(atPath: installed), "install-cli copies the tool into the isolated home")
             let after = PlainParser.status(call(runner, ["status", "--plain"]).stdout)
-            expect(after.cliInstalled == true, "status reports the CLI as installed after install-cli")
+            expect(after.cliInstalled == true && after.cliCurrent == true, "status reports the CLI as installed and current after install-cli")
         }
 
         let removed = call(runner, ["remove", "self-test", "--delete-config", "--yes"])

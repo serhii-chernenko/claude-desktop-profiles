@@ -85,6 +85,7 @@ struct ProfileProject: Identifiable, Hashable {
 struct StatusSummary: Equatable {
     var cliInstalled: Bool?
     var cliPath: String?
+    var cliCurrent: Bool?
     var identityName: String?
     var identityPresent: Bool?
     var identityUsable: Bool?

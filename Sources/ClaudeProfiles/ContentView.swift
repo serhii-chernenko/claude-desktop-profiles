@@ -1,7 +1,11 @@
+import AppKit
+import Combine
 import SwiftUI
 
 struct ContentView: View {
     @EnvironmentObject var model: AppModel
+
+    private static let periodicRefresh = Timer.publish(every: 30, on: .main, in: .common).autoconnect()
 
     var body: some View {
         NavigationSplitView {
@@ -56,6 +60,13 @@ struct ContentView: View {
         }
         .task {
             await model.refresh()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
+            Task { await model.autoRefresh() }
+        }
+        .onReceive(Self.periodicRefresh) { _ in
+            guard NSApplication.shared.occlusionState.contains(.visible) else { return }
+            Task { await model.autoRefresh() }
         }
         .onChange(of: model.selection) { selection in
             if case .profile(let slug) = selection {
