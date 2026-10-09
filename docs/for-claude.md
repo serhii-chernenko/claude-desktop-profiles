@@ -1,0 +1,438 @@
+# Manual procedure (for Claude Code, or a human)
+
+Use this when `bin/claude-profiles` cannot be used (it fails, or the repository is incomplete). Every step is a plain shell command. If the utility works, prefer `bin/claude-profiles ... --yes` instead; this document is its fallback and its specification.
+
+All commands are zsh. Replace the placeholders in the variables block once, then run the steps in order in the same shell session.
+
+## Who does what
+
+**Claude (or the human) can run every command in this document except the ones below.**
+
+**Only the human can do these. Stop, tell the user exactly what to do, and wait:**
+
+1. **`claude-profiles setup`** (signing identity import, trust prompt, key partition list, `launchctl bootstrap`). It needs the login password and cannot run in a sandboxed or auto-mode agent. Never run it for the user and never run its individual `security` or `launchctl` steps by hand. Ask the user to open Terminal and run `<repo>/bin/claude-profiles setup`.
+2. **The Keychain prompt** for "Claude Safe Storage" on the first launch of a new copy: the user must click **Always Allow**. Likewise macOS privacy prompts (microphone, screen recording, accessibility).
+3. **Pinning the launcher to the Dock** (drag `/Applications/Claude <Name> Launcher.app` onto the Dock, or right-click its icon, Options, Keep in Dock).
+4. **Signing in** to the new account inside the new copy.
+
+**Ask the user before doing any of these:**
+
+- quitting a running Claude copy (they can lose open conversations);
+- moving or deleting session history, config dirs or data dirs;
+- editing shell startup files such as `~/.zshrc`;
+- changing the `claude://` URL handler.
+
+**Never touch:** `/Applications/Claude.app` (the source; it is only read), the Keychain, LaunchAgents, and any profile you were not asked to change.
+
+## 0. Variables
+
+```zsh
+NAME="<Name>"
+SLUG="<slug>"
+SRC="/Applications/Claude.app"
+APP="/Applications/Claude $NAME.app"
+LAUNCHER="/Applications/Claude $NAME Launcher.app"
+BUNDLE_ID="com.anthropic.claudefordesktop.$SLUG"
+LAUNCHER_ID="$BUNDLE_ID.launcher"
+DATA_DIR="$HOME/Library/Application Support/Claude-${NAME// /-}"
+CONFIG_DIR="$HOME/.claude-$SLUG"
+HUE=<degrees>
+IDENTITY="Claude Profiles Signing"
+PB=/usr/libexec/PlistBuddy
+LSREG=/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister
+WORK=$(mktemp -d)
+echo "work dir: $WORK"
+```
+
+- `<Name>` is the display name, for example `Work`. `<slug>` is lowercase `[a-z0-9-]+`, for example `work`.
+- `<degrees>` is the hue rotation applied to the original orange icon. Rough guide: `25` yellow, `100` green, `190` blue, `260` violet, `320` pink.
+- To reuse an existing data or config folder, set `DATA_DIR` or `CONFIG_DIR` to it instead (candidates are listed in step 7).
+
+## 1. Preflight
+
+```zsh
+[[ -d $SRC ]] && echo "source ok" || echo "MISSING: $SRC"
+sw_vers -productVersion
+[[ -e $APP ]] && echo "EXISTS: $APP (this is a rebuild)"
+pgrep -fl "^$APP/Contents/MacOS/" || echo "copy not running"
+pgrep -fl "^$SRC/Contents/MacOS/" || echo "source not running"
+```
+
+- The macOS version must be 13 or newer.
+- If the copy is running, ask the user to quit it, or ask permission to quit it: `osascript -e "tell application id \"$BUNDLE_ID\" to quit"`.
+
+Choose the signing identity. A named identity is used when it exists and works; otherwise ad-hoc (`-`):
+
+```zsh
+SIGN_ID=-
+if security find-certificate -c "$IDENTITY" "$HOME/Library/Keychains/login.keychain-db" >/dev/null 2>&1; then
+  cp /usr/bin/true "$WORK/probe"
+  if codesign --force --sign "$IDENTITY" --timestamp=none "$WORK/probe" </dev/null >/dev/null 2>&1; then
+    SIGN_ID="$IDENTITY"
+  else
+    echo "STOP: identity exists but cannot sign (locked keychain?). Do not fall back to ad-hoc. Ask the user to unlock the login keychain or run setup."
+  fi
+fi
+echo "SIGN_ID=$SIGN_ID"
+```
+
+If the output says STOP, stop and report it to the user.
+
+## 2. Copy the app and edit its Info.plist
+
+```zsh
+STAGE="$WORK/stage/Claude $NAME.app"
+mkdir -p "$WORK/stage"
+ditto "$SRC" "$STAGE"
+PLIST="$STAGE/Contents/Info.plist"
+
+$PB -c "Set :CFBundleIdentifier $BUNDLE_ID" "$PLIST"
+$PB -c "Set :CFBundleDisplayName $NAME" "$PLIST" 2>/dev/null || $PB -c "Add :CFBundleDisplayName string $NAME" "$PLIST"
+$PB -c "Add :LSEnvironment dict" "$PLIST" 2>/dev/null || true
+$PB -c "Delete :LSEnvironment:CLAUDE_CONFIG_DIR" "$PLIST" 2>/dev/null || true
+$PB -c "Add :LSEnvironment:CLAUDE_CONFIG_DIR string $CONFIG_DIR" "$PLIST"
+$PB -c "Delete :CFBundleIconName" "$PLIST" 2>/dev/null || true
+
+EXE=$($PB -c "Print :CFBundleExecutable" "$PLIST")
+echo "executable: $EXE"
+```
+
+`CFBundleExecutable` must stay the real binary: never replace it with a script (see [how-it-works.md](how-it-works.md), fact 1). Skip the two `LSEnvironment:CLAUDE_CONFIG_DIR` lines only for a profile whose config dir is `~/.claude`.
+
+## 3. Tint the icon
+
+Write the tint script (CoreImage hue rotation) and apply it to every PNG of the icon set:
+
+```zsh
+cat > "$WORK/tint.js" <<'JXA'
+ObjC.import('AppKit'); ObjC.import('CoreImage');
+function run(argv) {
+  const url = $.NSURL.fileURLWithPath(argv[0]);
+  let image = $.CIImage.imageWithContentsOfURL(url);
+  const hue = $.CIFilter.filterWithName('CIHueAdjust');
+  hue.setValueForKey(image, 'inputImage');
+  hue.setValueForKey($(parseFloat(argv[1]) * Math.PI / 180), 'inputAngle');
+  image = hue.valueForKey('outputImage');
+  const controls = $.CIFilter.filterWithName('CIColorControls');
+  controls.setValueForKey(image, 'inputImage');
+  controls.setValueForKey($(parseFloat(argv[2] || '1')), 'inputSaturation');
+  image = controls.valueForKey('outputImage');
+  const rep = $.NSBitmapImageRep.alloc.initWithCIImage(image);
+  rep.representationUsingTypeProperties($.NSBitmapImageFileTypePNG, $()).writeToFileAtomically(argv[0], true);
+}
+JXA
+
+ICON_FILE=$($PB -c "Print :CFBundleIconFile" "$PLIST" 2>/dev/null || true)
+if [[ -n $ICON_FILE ]]; then
+  ICNS="$STAGE/Contents/Resources/${ICON_FILE%.icns}.icns"
+else
+  found=("$STAGE"/Contents/Resources/*.icns(N)); ICNS=${found[1]:-}
+  [[ -n $ICNS ]] && $PB -c "Add :CFBundleIconFile string ${ICNS:t}" "$PLIST"
+fi
+iconutil -c iconset "$ICNS" -o "$WORK/icon.iconset"
+for png in "$WORK"/icon.iconset/*.png; do osascript -l JavaScript "$WORK/tint.js" "$png" "$HUE" 1; done
+iconutil -c icns "$WORK/icon.iconset" -o "$ICNS"
+```
+
+Inside this repository, `osascript -l JavaScript lib/tint.js "$png" "$HUE" 1` does the same. If the icon cannot be tinted, continue: the copy still works, it just looks like the original.
+
+## 4. Re-sign inside-out
+
+Each nested item is signed first, keeping its entitlements minus the ones that get the process killed under a non-Apple signature. Save and run this script:
+
+```zsh
+cat > "$WORK/sign.zsh" <<'SIGN'
+#!/bin/zsh
+STAGE=$1 EXE=$2 BUNDLE_ID=$3 SIGN_ID=$4
+PB=/usr/libexec/PlistBuddy
+ENT=$(mktemp)
+
+sanitize_ents() {
+  local key
+  for key in ${(f)"$($PB -c Print "$1" 2>/dev/null | awk -F' = ' '/^    [^ }]/{sub(/^ +/,"",$1); print $1}')"}; do
+    case $key in
+      com.apple.developer.*|com.apple.application-identifier|keychain-access-groups|*team-identifier)
+        $PB -c "Delete :$key" "$1" ;;
+    esac
+  done
+  $PB -c Print "$1" 2>/dev/null | grep -q '^    [^ }]'
+}
+
+sign_one() {
+  local path=$1 id_args=() ts_args=()
+  [[ -n ${2:-} ]] && id_args=(--identifier "$2")
+  [[ $SIGN_ID != - ]] && ts_args=(--timestamp=none)
+  rm -f "$ENT"
+  if codesign -d --entitlements - --xml "$path" > "$ENT" 2>/dev/null && [[ -s $ENT ]] && sanitize_ents "$ENT"; then
+    codesign --force --sign "$SIGN_ID" "${ts_args[@]}" "${id_args[@]}" --entitlements "$ENT" "$path" 2>/dev/null
+  else
+    codesign --force --sign "$SIGN_ID" "${ts_args[@]}" "${id_args[@]}" "$path" 2>/dev/null
+  fi
+}
+
+xattr -cr "$STAGE"
+{
+  find "$STAGE/Contents" -type d \( -name '*.app' -o -name '*.framework' -o -name '*.xpc' -o -name '*.appex' \) -print0
+  find "$STAGE/Contents" -type f \( -perm -u+x -o -name '*.dylib' -o -name '*.node' -o -name '*.so' \) -print0 \
+    | while IFS= read -r -d '' f; do { file -b "$f" | grep -q Mach-O && printf '%s\0' "$f"; } || true; done
+} | while IFS= read -r -d '' f; do
+      printf '%d\t%s\n' "$(tr -cd / <<<"$f" | wc -c)" "$f"
+    done | sort -rn | cut -f2- | while IFS= read -r f; do
+      [[ $f == "$STAGE/Contents/MacOS/$EXE" ]] && continue
+      sign_one "$f" || echo "WARN: could not sign ${f#$STAGE/}"
+    done
+
+sign_one "$STAGE/Contents/MacOS/$EXE" "$BUNDLE_ID"
+bundle_ts=(); [[ $SIGN_ID != - ]] && bundle_ts=(--timestamp=none)
+codesign --force --sign "$SIGN_ID" "${bundle_ts[@]}" "$STAGE"
+codesign --verify --deep --strict "$STAGE" && echo "signature verified"
+rm -f "$ENT"
+SIGN
+
+zsh "$WORK/sign.zsh" "$STAGE" "$EXE" "$BUNDLE_ID" "$SIGN_ID"
+```
+
+This takes about a minute. A few `WARN: could not sign` lines are usually harmless; do not continue until `signature verified` appears.
+
+## 5. Swap the copy into place
+
+Confirm again that the copy is not running, then:
+
+```zsh
+if pgrep -f "^$APP/Contents/MacOS/" >/dev/null; then
+  echo "STOP: copy is running"
+else
+  rm -rf "$APP.old"
+  [[ -e $APP ]] && mv "$APP" "$APP.old"
+  if mv "$STAGE" "$APP"; then
+    rm -rf "$APP.old"
+  else
+    [[ -e $APP.old ]] && mv "$APP.old" "$APP"
+    echo "STOP: move failed, previous copy restored"
+  fi
+fi
+touch "$APP"
+"$LSREG" -f "$APP"
+ICNS="$APP/Contents/Resources/${ICNS:t}"
+```
+
+Writing to `/Applications` normally works for an admin user. If it is denied, ask the user.
+
+## 6. Build the launcher
+
+The launcher starts the copy with its own data and config dirs, then gives the `claude://` scheme back to regular Claude (see [how-it-works.md](how-it-works.md), fact 10). It is a small AppleScript applet plus two files in its `Contents/Resources`: `urlhandler.js` (copied from this repository's `lib/`) and `restore-link.sh`.
+
+```zsh
+cat > "$WORK/launcher.applescript" <<EOF
+if application id "$BUNDLE_ID" is running then
+  tell application id "$BUNDLE_ID"
+    reopen
+    activate
+  end tell
+else
+  do shell script "open -n -b $BUNDLE_ID --env " & quoted form of "CLAUDE_CONFIG_DIR=$CONFIG_DIR" & " --args " & quoted form of "--user-data-dir=$DATA_DIR"
+  do shell script "/bin/sh " & quoted form of (POSIX path of (path to resource "restore-link.sh")) & " >/dev/null 2>&1 &"
+end if
+EOF
+
+rm -rf "$LAUNCHER"
+osacompile -o "$LAUNCHER" "$WORK/launcher.applescript"
+REPO="<path-of-this-repository>"
+cp "$REPO/lib/urlhandler.js" "$LAUNCHER/Contents/Resources/urlhandler.js"
+STAMP="$HOME/.config/claude-profiles/state/link-at"
+SRC_ID=$($PB -c "Print :CFBundleIdentifier" "$SRC/Contents/Info.plist")
+cat > "$LAUNCHER/Contents/Resources/restore-link.sh" <<EOF
+stamp="$STAMP"; slug="$SLUG"; ttl=900; bid="$BUNDLE_ID"; src="$SRC_ID"; scheme=claude
+EOF
+cat >> "$LAUNCHER/Contents/Resources/restore-link.sh" <<'RESTORE'
+js="$(dirname "$0")/urlhandler.js"
+sleep 10
+if [ -r "$stamp" ]; then
+  read -r s_slug s_at < "$stamp"
+  case "$s_at" in ""|*[!0-9]*) s_at=0;; esac
+  if [ "$s_slug" = "$slug" ] && [ $(( $(date +%s) - s_at )) -le "$ttl" ]; then exit 0; fi
+fi
+cur=$(/usr/bin/osascript -l JavaScript "$js" get "$scheme" | tr '[:upper:]' '[:lower:]')
+[ "$cur" = "$(printf %s "$bid" | tr '[:upper:]' '[:lower:]')" ] || exit 0
+/usr/bin/osascript -l JavaScript "$js" set "$scheme" "$src"
+RESTORE
+LPLIST="$LAUNCHER/Contents/Info.plist"
+$PB -c "Set :CFBundleIdentifier $LAUNCHER_ID" "$LPLIST" 2>/dev/null || $PB -c "Add :CFBundleIdentifier string $LAUNCHER_ID" "$LPLIST"
+$PB -c "Delete :CFBundleIconName" "$LPLIST" 2>/dev/null || true
+rm -f "$LAUNCHER/Contents/Resources/Assets.car"
+cp "$ICNS" "$LAUNCHER/Contents/Resources/applet.icns"
+xattr -cr "$LAUNCHER"
+TS=(); [[ $SIGN_ID != - ]] && TS=(--timestamp=none)
+codesign --force --sign "$SIGN_ID" "${TS[@]}" "$LAUNCHER"
+touch "$LAUNCHER"
+"$LSREG" -f "$LAUNCHER"
+```
+
+Refresh the Dock icons (this briefly restarts the Dock):
+
+```zsh
+killall Dock
+```
+
+The restore step runs 10 seconds after a fresh launch and does nothing while a `link <slug>` window for this profile is open (`state/link-at` names the slug and is younger than `LINK_TTL`, 900 seconds by default) or when the handler is not this copy any more. Without it, launching the copy makes it the `claude://` handler and regular Claude stops receiving links.
+
+The launcher is the thing to start and to pin. Opening `$APP` directly runs it on the main data folder.
+
+## 7. CLI profile (config dir)
+
+A CLI profile is only a config directory. Its login is stored separately in the Keychain by Claude Code itself. A CLI-only profile (`--no-desktop`) needs only this step.
+
+```zsh
+mkdir -p "$CONFIG_DIR"
+CLAUDE_CONFIG_DIR="$CONFIG_DIR" claude
+```
+
+Use it by prefixing commands with `CLAUDE_CONFIG_DIR="$CONFIG_DIR"`, or define an alias (ask the user before editing their shell startup file):
+
+```zsh
+alias claude-<slug>='CLAUDE_CONFIG_DIR=~/.claude-<slug> claude'
+```
+
+To find existing folders that could be adopted instead of creating new ones:
+
+```zsh
+ls -d ~/.claude ~/.claude-* 2>/dev/null
+ls -d "$HOME/Library/Application Support/Claude" "$HOME/Library/Application Support"/Claude-* 2>/dev/null
+```
+
+To list the projects with history in a config dir together with their real working directory (the folder name cannot be reverse-decoded; the transcript's `cwd` field is the source of truth):
+
+```zsh
+FROM_CONFIG="$HOME/.claude"
+for dir in "$FROM_CONFIG"/projects/*/; do
+  first=$(ls "$dir"*.jsonl 2>/dev/null | head -1)
+  [[ -n $first ]] || continue
+  cwd=$(grep -m1 -o '"cwd":"[^"]*"' "$first" | head -1 | sed 's/^"cwd":"//; s/"$//')
+  printf '%s\t%s\t%s sessions\n' "${dir:t}" "$cwd" "$(ls "$dir"*.jsonl | wc -l | tr -d ' ')"
+done
+```
+
+### Linking a project's history to the profile (ask the user first)
+
+Options: share the history (symlink), reassign it (move) or copy it. `ENCODED` is the folder name printed above and `PROJECT_CWD` is its working directory. Quit Claude and any running Claude Code sessions before moving.
+
+```zsh
+ENCODED="<encoded-folder-name>"
+PROJECT_CWD="<absolute-project-path>"
+mkdir -p "$CONFIG_DIR/projects"
+```
+
+Pick exactly one:
+
+```zsh
+ln -s "$FROM_CONFIG/projects/$ENCODED" "$CONFIG_DIR/projects/$ENCODED"
+```
+
+```zsh
+mv "$FROM_CONFIG/projects/$ENCODED" "$CONFIG_DIR/projects/$ENCODED"
+```
+
+```zsh
+ditto "$FROM_CONFIG/projects/$ENCODED" "$CONFIG_DIR/projects/$ENCODED"
+```
+
+Then copy the project's entry in `.claude.json` (trust decisions, allowed tools). The file is `<config dir>/.claude.json`, except for `~/.claude`, where it is `~/.claude.json`:
+
+```zsh
+cat > "$WORK/copy-project.js" <<'JXA'
+ObjC.import('Foundation');
+function env(key) { const v = $.NSProcessInfo.processInfo.environment.objectForKey(key); return v.isNil() ? '' : ObjC.unwrap(v); }
+function read(path) { return JSON.parse(ObjC.unwrap($.NSString.stringWithContentsOfFileEncodingError(path, $.NSUTF8StringEncoding, $()))); }
+const from = env('FROM_FILE'), to = env('TO_FILE'), cwd = env('PROJECT_CWD');
+const source = read(from);
+const target = $.NSFileManager.defaultManager.fileExistsAtPath(to) ? read(to) : {};
+if (!source.projects || !source.projects[cwd]) throw new Error('no entry for ' + cwd + ' in ' + from);
+target.projects = target.projects || {};
+target.projects[cwd] = source.projects[cwd];
+$(JSON.stringify(target, null, 2)).writeToFileAtomicallyEncodingError(to, true, $.NSUTF8StringEncoding, $());
+JXA
+
+cp "$CONFIG_DIR/.claude.json" "$CONFIG_DIR/.claude.json.bak" 2>/dev/null || true
+FROM_FILE="$HOME/.claude.json" TO_FILE="$CONFIG_DIR/.claude.json" PROJECT_CWD="$PROJECT_CWD" osascript -l JavaScript "$WORK/copy-project.js"
+```
+
+Use `$FROM_CONFIG/.claude.json` as `FROM_FILE` when the source is not `~/.claude`. After a move, leave the old entry in place unless the user asks for it to be removed.
+
+## 8. Verify
+
+```zsh
+codesign --verify --deep --strict "$APP" && echo "OK signature valid"
+$PB -c "Print :CFBundleIdentifier" "$APP/Contents/Info.plist"
+$PB -c "Print :LSEnvironment:CLAUDE_CONFIG_DIR" "$APP/Contents/Info.plist"
+$PB -c "Print :CFBundleExecutable" "$APP/Contents/Info.plist"
+codesign -dvv "$APP" 2>&1 | grep -E "Authority|Signature|Identifier"
+[[ -d $LAUNCHER ]] && echo "OK launcher present"
+```
+
+`Signature=adhoc` means no stable identity: acceptable, but the user will see Keychain prompts after every rebuild until they run `setup`.
+
+After the user has launched the copy through the launcher once:
+
+```zsh
+[[ -n $(ls -A "$DATA_DIR" 2>/dev/null) ]] && echo "OK data dir populated" || echo "FAIL data dir empty: the copy ignored --user-data-dir"
+PID=$(pgrep -f "^$APP/Contents/MacOS/" | head -1)
+ps -ww -o command= -p "$PID" | grep -qF -- "--user-data-dir=$DATA_DIR" && echo "OK runs with --user-data-dir" || echo "FAIL bare launch: quit it and use the launcher"
+ps -E -ww -o command= -p "$PID" | tr ' ' '\n' | grep -qxF "CLAUDE_CONFIG_DIR=$CONFIG_DIR" && echo "OK CLAUDE_CONFIG_DIR set" || echo "FAIL no CLAUDE_CONFIG_DIR"
+echo "open files in ~/.claude: $(lsof -p "$PID" 2>/dev/null | grep -cF "$HOME/.claude/")"
+echo "open files in the main data dir: $(lsof -p "$PID" 2>/dev/null | grep -cF "$HOME/Library/Application Support/Claude/")"
+osascript -e "tell application \"System Events\" to tell (first process whose bundle identifier is \"$BUNDLE_ID\") to get {name, unix id, count of windows}"
+launchctl print "gui/$(id -u)/io.github.claude-desktop-profiles.rebuild" >/dev/null 2>&1 && echo "OK LaunchAgent loaded" || echo "INFO LaunchAgent not installed (the user can run setup)"
+```
+
+A `FAIL` line means the copy was started without the launcher: quit it and open the launcher. Both `open files` counts should be `0`. The System Events line should show a non-zero PID; a PID of 0 means the executable was wrapped (step 2 was violated).
+
+## 9. After Claude updates
+
+Rebuild by repeating steps 1 to 6 with the same variables; the data and config dirs are untouched. The automatic version of this is the LaunchAgent that `setup` installs.
+
+A copy is stale when its `CFBundleShortVersionString` or `CFBundleVersion` differs from the source's, its `CFBundleIdentifier` is not `$BUNDLE_ID`, the launcher is missing, or `LSEnvironment:CLAUDE_CONFIG_DIR` is missing:
+
+```zsh
+for key in CFBundleShortVersionString CFBundleVersion; do
+  echo "$key source=$($PB -c "Print :$key" "$SRC/Contents/Info.plist") copy=$($PB -c "Print :$key" "$APP/Contents/Info.plist")"
+done
+```
+
+## 10. Recolor only
+
+Repeat step 3 on a fresh icon set taken from the **source** app (`$SRC/Contents/Resources/electron.icns`, never from the already tinted copy) and write the result over the copy's `.icns` and the launcher's `applet.icns`. Then re-sign only the outer bundles and refresh:
+
+```zsh
+TS=(); [[ $SIGN_ID != - ]] && TS=(--timestamp=none)
+codesign --force --sign "$SIGN_ID" "${TS[@]}" "$APP"
+codesign --force --sign "$SIGN_ID" "${TS[@]}" "$LAUNCHER"
+"$LSREG" -f "$APP" "$LAUNCHER"
+killall Dock
+```
+
+The change shows in the Dock after the copy restarts.
+
+## 11. `claude://` sign-in links
+
+Signing in on the web returns to the desktop app through a `claude://` link, which macOS sends to the app registered for the scheme (normally the original Claude). To sign in inside a copy, the scheme must temporarily point to the copy. Prefer `bin/claude-profiles link <slug>` and `bin/claude-profiles link main` (the latter restores the original). Changing the handler by hand is the user's decision: ask first, and remind them to restore it to `com.anthropic.claudefordesktop` when the sign-in is done. A copy that opens on the wrong profile after a link click is the symptom of a forgotten restore. Launching any copy also takes the scheme over (Electron registers itself on startup); the launcher built in step 6 undoes that after about 10 seconds, so a copy started some other way (Finder, Spotlight) leaves the scheme pointing at it until `claude-profiles link main` or the `auto` agent restores it.
+
+## 12. Remove a profile
+
+Ask first. Quit the copy, check that `claude://` does not point at it, then remove the app and the launcher; keep the data and config dirs unless the user explicitly asks to delete them. `claude-profiles remove` restores the handler itself before deleting. By hand: run `osascript -l JavaScript lib/urlhandler.js get claude` and, if it prints `$BUNDLE_ID`, ask the user and run `osascript -l JavaScript lib/urlhandler.js set claude <source-bundle-id>` (the source app's `CFBundleIdentifier`).
+
+```zsh
+osascript -e "tell application id \"$BUNDLE_ID\" to quit"
+sleep 3
+rm -rf "$APP" "$LAUNCHER"
+killall Dock
+```
+
+Deleting `$DATA_DIR` signs the account out of that copy; deleting `$CONFIG_DIR` deletes its session history. Do either only on an explicit request.
+
+## 13. Clean up and report
+
+```zsh
+rm -rf "$WORK"
+```
+
+Then tell the user what is done and list the human-only steps still pending: pin the launcher, sign in, click **Always Allow** on the Keychain prompt, and optionally run `setup` in Terminal.

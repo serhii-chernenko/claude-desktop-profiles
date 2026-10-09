@@ -1,0 +1,37 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Build app and DMG
+        run: |
+          export VERSION="${GITHUB_REF_NAME#v}"
+          zsh scripts/build-app.sh
+          zsh scripts/build-dmg.sh
+
+      - name: Write the SHA-256 checksum
+        working-directory: dist
+        run: |
+          for dmg in *.dmg; do
+            shasum -a 256 "$dmg" > "$dmg.sha256"
+          done
+
+      - name: Create the release or update its assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" dist/*.dmg dist/*.dmg.sha256 --clobber --repo "$GITHUB_REPOSITORY"
+          else
+            gh release create "$GITHUB_REF_NAME" dist/*.dmg dist/*.dmg.sha256 --title "$GITHUB_REF_NAME" --generate-notes --repo "$GITHUB_REPOSITORY"
+          fi

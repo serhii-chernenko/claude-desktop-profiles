@@ -1,0 +1,31 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Syntax-check zsh scripts
+        run: |
+          for script in bin/claude-profiles scripts/*.sh install.sh; do
+            [ -f "$script" ] || continue
+            zsh -n "$script"
+            echo "ok $script"
+          done
+
+      - name: Compile the GUI applet
+        run: osacompile -o "$RUNNER_TEMP/Claude Profiles.app" "gui/Claude Profiles.applescript"
+
+      - name: Build the app and DMG
+        run: |
+          zsh scripts/build-app.sh
+          zsh scripts/build-dmg.sh
