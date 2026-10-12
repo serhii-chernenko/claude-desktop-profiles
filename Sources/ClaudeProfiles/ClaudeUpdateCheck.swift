@@ -43,6 +43,9 @@ enum ClaudeUpdateCheck {
     static let caption = "Opens Claude and runs its own update check. Profiles follow automatically after Claude updates."
     static let manualPath = "In Claude, choose Claude → Check for Updates…"
     static let accessibilitySettingsURL = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")!
+    static let accessibilityRepairHint = "If Claude Profiles is already switched on there, select it, remove it with −, then come back and try again — macOS keeps the permission of an older build."
+    static let accessibilityRelaunchHint = "macOS added Claude Profiles to the list — switch it on, then quit and reopen Claude Profiles."
+    private static let renamedPaneMajorVersion = 27
     private static let updateItemPrefix = "check for update"
     private static let permissionErrorCodes = ["-1743", "-25211", "-1719", "-25204"]
 
@@ -64,6 +67,27 @@ enum ClaudeUpdateCheck {
         }
     }
 
+    static func accessibilityPaneName(majorVersion: Int) -> String {
+        if majorVersion >= renamedPaneMajorVersion {
+            return "Device Control and Data Access (called Accessibility before macOS \(renamedPaneMajorVersion))"
+        }
+        return "Accessibility (called Device Control and Data Access on macOS \(renamedPaneMajorVersion))"
+    }
+
+    static var accessibilityPane: String {
+        accessibilityPaneName(majorVersion: ProcessInfo.processInfo.operatingSystemVersion.majorVersion)
+    }
+
+    static var accessibilityLocation: String {
+        "System Settings → Privacy & Security → \(accessibilityPane)"
+    }
+
+    @discardableResult
+    static func requestAccessibilityPrompt() -> Bool {
+        let promptKey = kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String
+        return AXIsProcessTrustedWithOptions([promptKey: true] as CFDictionary)
+    }
+
     static func isPermissionFailure(_ stderr: String) -> Bool {
         permissionErrorCodes.contains { stderr.contains($0) }
     }
@@ -72,7 +96,7 @@ enum ClaudeUpdateCheck {
         if stderr.contains("-1743") {
             return "Claude Profiles is not allowed to control System Events. Allow it in System Settings → Privacy & Security → Automation."
         }
-        return "Claude Profiles is not allowed to use Accessibility. Allow it in System Settings → Privacy & Security → Accessibility."
+        return "Claude Profiles is not allowed to use Accessibility. Allow it in \(accessibilityLocation). \(accessibilityRepairHint)"
     }
 
     static let listMenuScript = """
@@ -192,8 +216,14 @@ enum ClaudeUpdateCheck {
         let alert = NSAlert()
         alert.alertStyle = .informational
         alert.messageText = "Allow Accessibility to check for Claude updates"
-        alert.informativeText = "Claude Profiles clicks Claude's own “Check for Updates…” menu item through System Events. macOS only allows that once Claude Profiles is enabled under Privacy & Security → Accessibility. It only reads Claude's menu names and clicks that one item."
-        alert.addButton(withTitle: "Open Accessibility Settings")
+        alert.informativeText = """
+        Claude Profiles clicks Claude's own “Check for Updates…” menu item through System Events. macOS only allows that once Claude Profiles is enabled under \(accessibilityLocation). It only reads Claude's menu names and clicks that one item.
+
+        \(accessibilityRelaunchHint)
+
+        \(accessibilityRepairHint)
+        """
+        alert.addButton(withTitle: "Open Settings")
         alert.addButton(withTitle: "Just Open Claude")
         alert.addButton(withTitle: "Cancel")
         switch alert.runModal() {

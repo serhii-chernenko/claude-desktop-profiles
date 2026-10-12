@@ -3,7 +3,11 @@
 #
 #   zsh scripts/build-app.sh
 #   VERSION=1.2.3 zsh scripts/build-app.sh          override the version (default: ./VERSION, else 0.1.0)
-#   SIGNING_IDENTITY="Name" zsh scripts/build-app.sh sign with a certificate instead of ad-hoc
+#   SIGNING_IDENTITY="Name" zsh scripts/build-app.sh sign with this certificate (SIGNING_IDENTITY=- forces ad-hoc)
+#
+# Without SIGNING_IDENTITY the app is signed with "Claude Profiles Signing" when that certificate is in the
+# login keychain and a non-interactive test signature works; otherwise it falls back to ad-hoc with a warning.
+# A stable identity keeps the designated requirement the same across builds, so macOS privacy grants survive.
 #
 # bin/, lib/ and the version are copied into Contents/Resources/cli/, where the app runs the CLI.
 # Sparkle 2 is downloaded and checksum-verified by scripts/fetch-sparkle.sh, embedded in
@@ -18,10 +22,11 @@ APP_NAME="Claude Profiles"
 APP="$DIST/$APP_NAME.app"
 EXECUTABLE=ClaudeProfiles
 BUNDLE_ID="io.github.claude-desktop-profiles.app"
-SIGNING_IDENTITY="${SIGNING_IDENTITY:--}"
 PB=/usr/libexec/PlistBuddy
 
 die() { print -u2 "ERROR: $*"; exit 1; }
+
+source "$ROOT/scripts/signing-identity.sh"
 
 read_version() {
   local from_file=""
@@ -43,8 +48,20 @@ bundle_build_number() {
   print -r -- $(( major * 10000 + minor * 100 + patch ))
 }
 
+SIGN_IDENTITY=$(resolve_signing_identity)
+SIGN_TIMESTAMP_ARGS=()
+if [[ $SIGN_IDENTITY == - ]]; then
+  print -u2 "WARN: signing ad-hoc. macOS privacy grants such as Accessibility stop matching after every rebuild or update."
+  print -u2 "WARN: create the \"$DEFAULT_SIGNING_IDENTITY\" identity with bin/claude-profiles setup, or set SIGNING_IDENTITY."
+  print "Signing identity: ad-hoc"
+else
+  identity_can_sign "$SIGN_IDENTITY" || die "codesign cannot sign with \"$SIGN_IDENTITY\" without a prompt: the certificate is missing, or the login keychain is locked. Run bin/claude-profiles setup."
+  identity_is_self_signed "$SIGN_IDENTITY" && SIGN_TIMESTAMP_ARGS=(--timestamp=none)
+  print "Signing identity: $SIGN_IDENTITY (SHA-1 $(identity_sha1 "$SIGN_IDENTITY"))"
+fi
+
 sign_bundle() {
-  codesign --force --sign "$SIGNING_IDENTITY" "$@"
+  codesign --force --sign "$SIGN_IDENTITY" "${SIGN_TIMESTAMP_ARGS[@]}" "$@"
 }
 
 VERSION_STRING=$(read_version)

@@ -262,7 +262,7 @@ final class AppModel: ObservableObject {
         defer { isCheckingClaudeUpdates = false }
         logVisible = true
         appendLog("Check for Claude Updates", isError: false, isCommand: true)
-        guard AXIsProcessTrusted() else {
+        guard AXIsProcessTrusted() || ClaudeUpdateCheck.requestAccessibilityPrompt() else {
             await handleMissingAccessibility()
             return
         }
@@ -293,11 +293,11 @@ final class AppModel: ObservableObject {
     }
 
     private func handleMissingAccessibility() async {
-        appendLog("Accessibility access is not granted to Claude Profiles, so Claude's update menu cannot be clicked.", isError: true, isCommand: false)
+        appendLog("Accessibility access is not granted to Claude Profiles, so Claude's update menu cannot be clicked. Allow it in \(ClaudeUpdateCheck.accessibilityLocation). \(ClaudeUpdateCheck.accessibilityRelaunchHint) \(ClaudeUpdateCheck.accessibilityRepairHint)", isError: true, isCommand: false)
         switch ClaudeUpdateCheck.askAboutAccessibility() {
         case .openSettings:
             NSWorkspace.shared.open(ClaudeUpdateCheck.accessibilitySettingsURL)
-            appendLog("Opened Accessibility settings. Enable Claude Profiles there, then run the check again.", isError: false, isCommand: false)
+            appendLog("Opened the privacy settings. Switch Claude Profiles on under \(ClaudeUpdateCheck.accessibilityPane), then quit and reopen Claude Profiles and run the check again.", isError: false, isCommand: false)
         case .justOpenClaude:
             _ = await ClaudeUpdateCheck.activateClaude()
             appendLog(ClaudeUpdateCheck.manualPath, isError: false, isCommand: false)

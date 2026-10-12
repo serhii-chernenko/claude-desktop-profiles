@@ -100,6 +100,7 @@ enum SelfTest {
         let laterOnly = [MenuEntry(menuIndex: 2, menuName: "Claude", itemIndex: 1, itemName: "About Claude"), MenuEntry(menuIndex: 5, menuName: "Help", itemIndex: 3, itemName: "Check for updates...")]
         expect(ClaudeUpdateCheck.updateMenuItem(in: laterOnly)?.menuName == "Help", "update item falls back to the other menus")
         expect(ClaudeUpdateCheck.updateMenuItem(in: [MenuEntry(menuIndex: 2, menuName: "Claude", itemIndex: 1, itemName: "About Claude")]) == nil && ClaudeUpdateCheck.updateMenuItem(in: []) == nil, "no update item is reported when none matches")
+        expect(ClaudeUpdateCheck.accessibilityPaneName(majorVersion: 26).hasPrefix("Accessibility") && ClaudeUpdateCheck.accessibilityPaneName(majorVersion: 27).hasPrefix("Device Control and Data Access") && ClaudeUpdateCheck.accessibilityPaneName(majorVersion: 26).contains("Device Control and Data Access"), "the Accessibility pane is named for the OS version and mentions both names")
         expect(ClaudeUpdateCheck.isPermissionFailure("execution error: Not authorized to send Apple events to System Events. (-1743)") && ClaudeUpdateCheck.isPermissionFailure("osascript is not allowed assistive access. (-25211)") && !ClaudeUpdateCheck.isPermissionFailure("Can’t get application process. (-1728)"), "permission failures are told apart from a missing process")
     }
 

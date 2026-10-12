@@ -4,9 +4,14 @@
 #
 #   zsh scripts/prepare-release.sh
 #   VERSION=1.2.3 zsh scripts/prepare-release.sh    override the version (default: ./VERSION, else 0.1.0)
+#   ALLOW_ADHOC_RELEASE=1 zsh scripts/prepare-release.sh
+#                                                   permit an ad-hoc signed release (privacy grants will not survive it)
 #   STOP_AFTER_APPCAST=1 zsh scripts/prepare-release.sh
 #                                                   dry run: stop once the signed appcast is verified and
 #                                                   copied to dist/ (no SHA256SUMS.txt, no publish command)
+#
+# Releases are signed with a stable identity (SIGNING_IDENTITY, else "Claude Profiles Signing") and every later
+# release must use the same certificate. Without a usable identity the script refuses to build.
 #
 # Steps: check that the keychain key matches SUPublicEDKey in Resources/Info.plist, build the app
 # and DMG, zip the app, generate and verify the signed appcast.xml, write SHA256SUMS.txt in dist/
@@ -23,6 +28,8 @@ APP_NAME="Claude Profiles"
 ASSET_PREFIX="Claude-Profiles"
 
 die() { print -u2 "ERROR: $*"; exit 1; }
+
+source "$ROOT/scripts/signing-identity.sh"
 
 read_version() {
   local from_file=""
@@ -43,6 +50,19 @@ DMG_NAME="$ASSET_PREFIX-$VERSION_STRING.dmg"
 ZIP_NAME="$ASSET_PREFIX-$VERSION_STRING.zip"
 TAG="v$VERSION_STRING"
 
+RELEASE_IDENTITY=$(resolve_signing_identity)
+if [[ $RELEASE_IDENTITY == - ]]; then
+  [[ ${ALLOW_ADHOC_RELEASE:-0} == 1 ]] \
+    || die "No usable signing identity: this release would be signed ad-hoc and macOS privacy grants (Accessibility) would stop matching after the update. Create \"$DEFAULT_SIGNING_IDENTITY\" with bin/claude-profiles setup or set SIGNING_IDENTITY, or set ALLOW_ADHOC_RELEASE=1 to release ad-hoc anyway. Nothing was built or signed."
+  print -u2 "WARN: ALLOW_ADHOC_RELEASE=1: building an ad-hoc signed release."
+  print "Release signing identity: ad-hoc"
+else
+  identity_can_sign "$RELEASE_IDENTITY" \
+    || die "codesign cannot sign with \"$RELEASE_IDENTITY\" without a prompt: the certificate is missing, or the login keychain is locked. Nothing was built or signed."
+  print "Release signing identity: $RELEASE_IDENTITY (SHA-1 $(identity_sha1 "$RELEASE_IDENTITY"))"
+fi
+export SIGNING_IDENTITY=$RELEASE_IDENTITY
+
 SPARKLE_DIR=$("$ROOT/scripts/fetch-sparkle.sh")
 EXPECTED_KEY=$(/usr/libexec/PlistBuddy -c 'Print :SUPublicEDKey' "$INFO_PLIST")
 ACTUAL_KEY=$("$SPARKLE_DIR/bin/generate_keys" --account "$KEY_ACCOUNT" -p 2>/dev/null) || ACTUAL_KEY=""
@@ -53,6 +73,10 @@ fi
 VERSION=$VERSION_STRING SKIP_APP_BUILD=0 zsh "$ROOT/scripts/build-dmg.sh"
 [[ -d $DIST/$APP_NAME.app ]] || die "Missing $DIST/$APP_NAME.app"
 [[ -f $DIST/$DMG_NAME ]] || die "Missing $DIST/$DMG_NAME"
+if [[ $RELEASE_IDENTITY != - ]]; then
+  codesign -d -r- "$DIST/$APP_NAME.app" 2>&1 | grep -q 'certificate leaf' \
+    || die "The built app's designated requirement is not certificate-based: the release was not signed with \"$RELEASE_IDENTITY\"."
+fi
 
 rm -f "$DIST/$ZIP_NAME"
 ditto -c -k --sequesterRsrc --keepParent "$DIST/$APP_NAME.app" "$DIST/$ZIP_NAME"

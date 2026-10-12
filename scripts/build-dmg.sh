@@ -38,7 +38,7 @@ ln -s /Applications "$STAGE/Applications"
 cat > "$STAGE/READ ME FIRST.txt" <<'TEXT'
 1. Drag "Claude Profiles.app" to Applications. Do not run it from this disk image.
 2. Open it from Applications. macOS blocks the first launch because the app is
-   ad-hoc signed and not notarized:
+   not notarized:
    - open System Settings > Privacy & Security, scroll to Security and click
      "Open Anyway" for Claude Profiles (available for about an hour after the
      blocked launch), then click "Open" and enter your password if asked;

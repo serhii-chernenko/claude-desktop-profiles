@@ -59,7 +59,7 @@ Opening the copy from Spotlight, Finder, a `claude://` link or session restore s
 
 ### 6. Why a stable signing identity
 
-An ad-hoc signature has a designated requirement based on the code directory hash, so every rebuild is a "different app" to macOS. That re-triggers the Keychain prompt for "Claude Safe Storage" and the privacy (TCC) prompts. A self-signed identity that is trusted for code signing gives a designated requirement based on the certificate, which stays the same across rebuilds. `setup` creates it, trusts it with `security add-trusted-cert -p codeSign`, and fixes the key partition list so `codesign` can use the key without a prompt.
+An ad-hoc signature has a designated requirement based on the code directory hash, so every rebuild is a "different app" to macOS. That re-triggers the Keychain prompt for "Claude Safe Storage" and the privacy (TCC) prompts. A self-signed identity that is trusted for code signing gives a designated requirement based on the certificate, which stays the same across rebuilds. `setup` creates it, trusts it with `security add-trusted-cert -p codeSign`, and fixes the key partition list so `codesign` can use the key without a prompt. The Claude Profiles app itself is signed the same way, so its Accessibility grant (called Device Control and Data Access on macOS 27) survives rebuilds and updates; an older ad-hoc build leaves a grant that the System Settings toggle still shows but that no longer matches, and removing the entry with − and granting it again repairs that.
 
 The identity is chosen per profile, in this order, and the first one that is in the login keychain and passes a non-interactive test signature wins:
 

@@ -1,7 +1,6 @@
-<h2>Claude Profiles 0.1.0</h2>
+<h2>Claude Profiles 0.1.1</h2>
 <ul>
-  <li>Add a Home screen as the default view: how it works in a few steps, a card for each profile and a setup status row.</li>
-  <li>Update the app automatically through Sparkle. Use Check for Updates… in the app menu, or the Updates section in Settings. Updates are verified with an Ed25519 signature before they are installed.</li>
-  <li>Add an About window with links to the project.</li>
-  <li>Keep the installed claude-profiles command current after an update, so the auto-rebuild agent never runs an outdated copy.</li>
+  <li>Releases are now signed with a stable certificate instead of ad-hoc. macOS keeps the Accessibility permission across updates instead of silently dropping it.</li>
+  <li>Check for Claude Updates asks macOS for the Accessibility permission itself, so Claude Profiles shows up in the list again after it was removed.</li>
+  <li>The permission is named the way macOS 27 shows it: Device Control and Data Access. There is also a fix for when the switch is already on but the permission does not work.</li>
 </ul>
