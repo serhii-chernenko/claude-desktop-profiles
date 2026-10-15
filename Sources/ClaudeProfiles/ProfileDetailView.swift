@@ -7,6 +7,7 @@ struct ProfileDetailView: View {
     @State private var colorDraft: Color
     @State private var syncedHex: String?
     @State private var recolorTask: Task<Void, Never>?
+    @State private var confirmingPermissionReset = false
 
     init(profile: Profile) {
         self.profile = profile
@@ -37,6 +38,15 @@ struct ProfileDetailView: View {
             projectsSection
         }
         .formStyle(.grouped)
+        .confirmationDialog("Reset the macOS permissions of Claude \(profile.name)?",
+                            isPresented: $confirmingPermissionReset) {
+            Button("Reset Permissions", role: .destructive) {
+                Task { await model.run("Reset permissions of \(profile.name)", ["reset-permissions", profile.slug, "--yes"]) }
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("Camera, microphone, Files & Folders, Accessibility and the other privacy grants of this app are cleared. macOS asks again where it can; elsewhere you turn the app on again in System Settings > Privacy & Security.")
+        }
         .onChange(of: profile.color) { newColor in
             recolorTask?.cancel()
             syncedHex = Color(hex: newColor)?.hexString
@@ -180,6 +190,14 @@ struct ProfileDetailView: View {
                         Task { await model.run("Rebuild \(profile.name)", ["build", profile.slug]) }
                     }
                     .disabled(model.isBusy || !model.sourceAppPresent)
+                }
+                ActionRow(title: "Reset Permissions",
+                          caption: "Use when a toggle in System Settings > Privacy & Security turns itself off, or macOS keeps denying access you granted. Earlier grants can stop matching after the app's signature changes.",
+                          systemImage: "lock.rotation") {
+                    Button("Reset Permissions…") {
+                        confirmingPermissionReset = true
+                    }
+                    .disabled(model.isBusy)
                 }
             } else {
                 ActionRow(title: "Use in Terminal",

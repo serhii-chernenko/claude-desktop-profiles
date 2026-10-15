@@ -18,6 +18,8 @@
 #                                       drop or repoint pins of the hidden copy or an old launcher; --pin adds it when missing
 #   resign <slug>                       re-sign only the outer bundle (and the launcher) with the resolved identity
 #   set <slug> sign-identity NAME|--clear   pin the signing identity of one profile
+#   reset-permissions <slug> [--service NAME] [--yes]   reset the app's macOS privacy permissions (all, or one
+#                                       tccutil service such as SystemPolicyAppDataDetailed) when grants stopped matching
 #   recolor <slug> [--color '#hex'|--hue DEG|--pick-color]
 #   check <slug>                        post-launch checks
 #   link <slug>|main                    send claude:// links to a profile (reverts after LINK_TTL) or back
@@ -52,7 +54,8 @@
 # CLAUDE_PROFILES_LAUNCHER_DIR (app and launcher dir, default /Applications), CLAUDE_PROFILES_APP_MODE (self or launcher,
 # the mode `new` and `build` use), CLAUDE_PROFILES_DOCK_PLIST (a plist file that `dock`, `show`, `check`, `build`,
 # `migrate-layout` and `remove` read and write instead of the real Dock; the Dock is not restarted),
-# CLAUDE_PROFILES_LSREGISTER (the lsregister tool used to register and unregister apps).
+# CLAUDE_PROFILES_LSREGISTER (the lsregister tool used to register and unregister apps),
+# CLAUDE_PROFILES_TCCUTIL (the tccutil tool used to reset privacy permissions).
 #
 setopt extended_glob
 set -euo pipefail
@@ -79,6 +82,7 @@ LINK_STAMP=$STATE_DIR/link-at
 LOG_FILE=${CLAUDE_PROFILES_LOG:-$HOME/Library/Logs/claude-profiles.log}
 PB=/usr/libexec/PlistBuddy
 LSREG=${CLAUDE_PROFILES_LSREGISTER:-/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister}
+TCCUTIL=${CLAUDE_PROFILES_TCCUTIL:-/usr/bin/tccutil}
 KEYCHAIN=$HOME/Library/Keychains/login.keychain-db
 AGENTS_DIR=${CLAUDE_PROFILES_AGENTS_DIR:-$HOME/Library/LaunchAgents}
 DEFAULT_APPS_DIR=/Applications/.claude-profiles
@@ -811,6 +815,31 @@ sign_bundle() {
     codesign --force --sign "$SIGN_ID" "${TS_ARGS[@]}" --entitlements "$ent" "$bundle" 2>"$TMP/codesign.err" || { cat "$TMP/codesign.err" >&2; return 1; }
   else
     codesign --force --sign "$SIGN_ID" "${TS_ARGS[@]}" "$bundle" 2>"$TMP/codesign.err" || { cat "$TMP/codesign.err" >&2; return 1; }
+  fi
+}
+
+app_requirement() {
+  local app=$1 expected=$2 output line
+  [[ -d $app && ${(L)$(plist_get "$app" CFBundleIdentifier)} == ${(L)expected} ]] || return 0
+  output=$(codesign -d -r- "$app" 2>&1 || true)
+  for line in "${(@f)output}"; do
+    line=${line#\# }
+    if [[ $line == "designated => "* ]]; then
+      print -r -- "${line#designated => }"
+      return 0
+    fi
+  done
+}
+
+reset_permissions_after_signing() {
+  local before=$1 after name=${PROFILE_APP:t:r}
+  after=$(app_requirement "$PROFILE_APP" "$PROFILE_BUNDLE_ID")
+  [[ -n $before && -n $after && $before != "$after" ]] || return 0
+  if "$TCCUTIL" reset All "$PROFILE_BUNDLE_ID" >/dev/null 2>&1; then
+    say "Reset the macOS privacy permissions of $name: its signature changed, so the earlier grants no longer match it. macOS asks again where it can; turn $name on again in System Settings where it cannot (Files & Folders, Accessibility, Full Disk Access)."
+    (( ! IS_AUTO )) || [[ $SIGN_ID == - ]] || notify "Its signature changed, so macOS privacy permissions were reset. Grant them again when asked or in System Settings." "$name"
+  else
+    warn "The signature of $name changed, but resetting its macOS privacy permissions failed. Earlier grants no longer match it; run: claude-profiles reset-permissions $SLUG"
   fi
 }
 
@@ -1700,6 +1729,8 @@ build_profile() {
 
   old_app=$PROFILE_APP
   old_launcher=$PROFILE_LAUNCHER
+  local old_requirement
+  old_requirement=$(app_requirement "$old_app" "$PROFILE_BUNDLE_ID")
   if [[ $mode == self ]]; then
     is_self_mode || PROFILE_APP=$LAUNCHER_DIR/${old_app:t}
     PROFILE_LAUNCHER=
@@ -1711,6 +1742,7 @@ build_profile() {
   fi
   local DST=$PROFILE_APP NAME=${PROFILE_APP:t:r} running
   assert_app_path "$DST"
+  [[ -n $old_requirement ]] || old_requirement=$(app_requirement "$DST" "$PROFILE_BUNDLE_ID")
   if [[ $mode == self ]]; then
     assert_ours_either "$DST" "$PROFILE_BUNDLE_ID" "$LID"
   else
@@ -1840,6 +1872,7 @@ build_profile() {
     profile_save
     rm -rf -- "$DST.old" "$PROFILE_LAUNCHER.old"
   fi
+  reset_permissions_after_signing "$old_requirement"
   if ! same_path "$old_app" "$DST" && { [[ $mode == self ]] || ! same_path "$old_app" "$PROFILE_LAUNCHER"; }; then
     remove_replaced_app "$old_app" "$PROFILE_BUNDLE_ID"
   fi
@@ -2744,9 +2777,12 @@ cmd_recolor() {
   fi
   say "Re-signing the outer bundle..."
   xattr -c "$dst_icns" 2>/dev/null || true
+  local old_requirement
+  old_requirement=$(app_requirement "$PROFILE_APP" "$PROFILE_BUNDLE_ID")
   sign_bundle "$PROFILE_APP" >/dev/null 2>&1 || die "Could not re-sign $PROFILE_APP; run: claude-profiles build $SLUG"
   touch -- "$PROFILE_APP"
   "$LSREG" -f "$PROFILE_APP" >/dev/null 2>&1 || true
+  reset_permissions_after_signing "$old_requirement"
   is_self_mode || build_launcher "$dst_icns"
   dock_restart
   if is_running "$PROFILE_APP"; then
@@ -2810,6 +2846,8 @@ cmd_resign() {
   assert_ours "$PROFILE_APP" "$PROFILE_BUNDLE_ID"
   need_lock
   choose_sign_id keep
+  local old_requirement
+  old_requirement=$(app_requirement "$PROFILE_APP" "$PROFILE_BUNDLE_ID")
   say "Re-signing the outer bundle of ${PROFILE_APP:t:r}..."
   sign_bundle "$PROFILE_APP" >/dev/null 2>&1 || die "Could not re-sign $PROFILE_APP; run: claude-profiles build $SLUG"
   if [[ -d $PROFILE_LAUNCHER ]]; then
@@ -2822,8 +2860,44 @@ cmd_resign() {
   fi
   touch -- "$PROFILE_APP"
   "$LSREG" -f "$PROFILE_APP" >/dev/null 2>&1 || true
+  reset_permissions_after_signing "$old_requirement"
   codesign --verify --strict "$PROFILE_APP" >/dev/null 2>&1 || warn "codesign --verify reported problems for $PROFILE_APP."
   say "Done. Nested code was left untouched. Check it: claude-profiles check $SLUG"
+}
+
+cmd_reset_permissions() {
+  local target="" service=All
+  while (( $# )); do
+    case $1 in
+      --service) need_value "$@"; service=$2; shift 2 ;;
+      --yes|-y) YES=1; shift ;;
+      --plain) PLAIN=1; shift ;;
+      -*) usage_error "reset-permissions <slug> [--service NAME] [--yes]" ;;
+      *) target=$1; shift ;;
+    esac
+  done
+  [[ -n $target ]] || usage_error "reset-permissions <slug> [--service NAME] [--yes]"
+  [[ $service == [A-Za-z]## ]] || usage_error "invalid service \"$service\" (a tccutil service name such as All or SystemPolicyAppDataDetailed)"
+  setup_colors
+  profile_load "$target"
+  (( PROFILE_DESKTOP )) || die "Profile \"$SLUG\" has no desktop app."
+  [[ -d $PROFILE_APP ]] || die "$PROFILE_APP not found. Build it first: claude-profiles build $SLUG"
+  assert_ours "$PROFILE_APP" "$PROFILE_BUNDLE_ID"
+  local name=${PROFILE_APP:t:r} scope
+  if [[ $service == All ]]; then
+    scope="all macOS privacy permissions"
+  else
+    scope="the macOS privacy permission $service"
+  fi
+  confirm "Reset $scope of $name? macOS asks again where it can; elsewhere you turn it on again in System Settings." || { say "Cancelled."; return 0; }
+  "$LSREG" -f "$PROFILE_APP" >/dev/null 2>&1 || true
+  "$TCCUTIL" reset "$service" "$PROFILE_BUNDLE_ID" >/dev/null 2>&1 || die "tccutil could not reset $service for $PROFILE_BUNDLE_ID."
+  say "Reset $scope of $name."
+  if is_running "$PROFILE_APP"; then
+    say "$name is running: quit and reopen it, then grant access again when asked or in System Settings > Privacy & Security."
+  else
+    say "Open $name and grant access again when asked or in System Settings > Privacy & Security."
+  fi
 }
 
 cli_tree_hash() {
@@ -3012,7 +3086,7 @@ cmd_check() {
   elif [[ $SIGN_ID != - && $outer_authority == "$SIGN_ID" ]]; then
     ok "$NAME is signed by \"$SIGN_ID\" (stable signature, no re-prompts on rebuild)"
   elif grep -q 'Signature=adhoc' <<<"$sig"; then
-    warnl "$NAME is signed ad-hoc: re-prompts on rebuild"
+    warnl "$NAME is signed ad-hoc: re-prompts on rebuild. If a permission toggle in System Settings turns itself off, run: claude-profiles reset-permissions $SLUG"
   else
     warnl "$NAME is signed by \"${outer_authority:-unknown}\", not by the resolved identity \"$SIGN_ID\""
   fi
@@ -4548,6 +4622,7 @@ main() {
     migrate-layout) cmd_migrate_layout "$@" ;;
     dock) cmd_dock "$@" ;;
     resign) cmd_resign "$@" ;;
+    reset-permissions) cmd_reset_permissions "$@" ;;
     set) cmd_set "$@" ;;
     recolor) cmd_recolor "$@" ;;
     check) cmd_check "$@" ;;
