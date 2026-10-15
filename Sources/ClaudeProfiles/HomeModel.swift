@@ -196,10 +196,10 @@ enum HowItWorks {
 enum SetupCopy {
     static let actionTitle = "Set up auto-rebuild & stable signing"
     static let bannerTitle = "Finish the one-time setup (about 1 minute)"
-    static let explanation = "Without it, profiles stay on the old Claude version after Claude updates, and macOS asks for Keychain and permissions again after every rebuild."
+    static let explanation = "Without it, profiles stay on the old Claude version after Claude updates, and macOS asks for permissions again after every rebuild."
     static let firstProfileNudge = "Do it now so your first profile is set up right."
     static let agentReason = "The auto-rebuild agent notices when Claude updates and rebuilds your profiles that are not running, so they follow the new version."
-    static let certificateReason = "The stable signing certificate lives in your login keychain. It gives every rebuild the same identity, so macOS remembers your Keychain and permission choices."
+    static let certificateReason = "The stable signing certificate lives in your login keychain. It gives every rebuild the same identity, so macOS remembers your permission choices. The Keychain still asks once after each rebuild."
     static let passwordNote = "Terminal opens once because macOS asks for your login password there. This app never handles passwords."
     static let followUpTitle = "Profile created. Finish the one-time setup now?"
     static let detailWarning = "Auto-updates are off until the one-time setup is done"

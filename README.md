@@ -31,7 +31,7 @@ Requires macOS 13 or newer. Desktop profiles also need an installed `/Applicatio
 ### Quick start
 
 1. **Create a profile.** Press **New Profile** (or ⌘N), give it a name and a color.
-2. **Do the one-time setup.** Press **Set Up…** in the banner at the top of Home (about 1 minute). Terminal opens once and asks for your login password; the app never sees it. This step is not optional in practice: it installs the auto-rebuild agent, so profiles follow Claude's updates, and a stable signing certificate, so macOS stops asking for Keychain access and permissions again after every rebuild. Without it, profiles stay on the old Claude version after Claude updates and macOS re-prompts after every rebuild. The banner disappears when both are in place.
+2. **Do the one-time setup.** Press **Set Up…** in the banner at the top of Home (about 1 minute). Terminal opens once and asks for your login password; the app never sees it. This step is not optional in practice: it installs the auto-rebuild agent, so profiles follow Claude's updates, and a stable signing certificate, so macOS keeps the profile's privacy permissions across rebuilds. Without it, profiles stay on the old Claude version after Claude updates and macOS asks for permissions again after every rebuild. The Keychain still asks once after each rebuild (see [Stable signing](#stable-signing)). The banner disappears when both are in place.
 3. **Open it like any app.** Pin the new **Claude `<Name>`** (in `/Applications`) to the Dock, or start it from Spotlight, and sign in. It is the profile itself: open it any way you like.
 4. **Optional: Terminal.** Turn on shell integration under **Setup & Settings** so `claude` picks the profile by folder.
 
@@ -196,7 +196,9 @@ The log is `~/Library/Logs/claude-profiles.log`.
 
 ### Stable signing
 
-Ad-hoc signatures change on every rebuild, so macOS would ask again for Keychain access ("Claude Safe Storage") and privacy permissions after each Claude update. `setup` creates a self-signed code-signing identity (default name `Claude Profiles Signing`) in your login keychain, trusts it for code signing and lets `codesign` use it without prompts. Rebuilds then keep the same designated requirement and macOS stops asking. `setup` is interactive because it needs your login password; it must be run by you in Terminal. Treat it as part of the install: without it profiles are ad-hoc signed and macOS asks again after each rebuild, and without the agent they stay on the old Claude version until you rebuild by hand.
+Ad-hoc signatures change on every rebuild, so macOS would ask again for Keychain access ("Claude Safe Storage") and privacy permissions after each Claude update. `setup` creates a self-signed code-signing identity (default name `Claude Profiles Signing`) in your login keychain, trusts it for code signing and lets `codesign` use it without prompts. Rebuilds then keep the same designated requirement, so privacy permissions and the Keychain's list of allowed apps carry over.
+
+The Keychain still asks once after every rebuild, and after `recolor`. Each login-keychain item also has a partition list, which macOS checks by Apple Team ID. A self-signed certificate has no Team ID, so macOS identifies each build by its code hash instead, and every new build has to be added to the item. That is the dialog that asks for your login keychain password. Click **Always Allow** and enter the password; it holds until the next rebuild. The same applies to "Chrome Safe Storage" when a profile imports cookies from Google Chrome. Ad-hoc profiles get this prompt too, plus the privacy prompts. `setup` is interactive because it needs your login password; it must be run by you in Terminal. Treat it as part of the install: without it profiles are ad-hoc signed and macOS asks again after each rebuild, and without the agent they stay on the old Claude version until you rebuild by hand.
 
 The identity is chosen per profile: the one set with `set <slug> sign-identity` (or `adopt --identity`), else the one that already signs the copy's nested code, else the global one from `setup`, else ad-hoc. If the chosen identity cannot sign (locked keychain), `build`, `recolor` and `launcher` stop instead of mixing an ad-hoc outer signature with identity-signed helpers. Details: [docs/how-it-works.md](docs/how-it-works.md).
 
@@ -241,9 +243,9 @@ The `claude-profiles.bak` backups: when a project is linked, edited `.claude.jso
 
 ## Troubleshooting
 
-**Keychain asks for "Claude Safe Storage".** Click **Always Allow**. With the stable signing identity from `setup` this happens once; with ad-hoc signing it happens after each rebuild. Until it is answered the app waits at startup and does not react to Quit; answer the prompt first.
+**Keychain asks for "Claude Safe Storage" (and for your login keychain password).** Enter the password and click **Always Allow**. It happens on the first launch after every rebuild or recolor, with or without the stable signing identity from `setup`, because the Keychain recognizes a build without an Apple Team ID only by its code hash (see [Stable signing](#stable-signing)). Until it is answered the app waits at startup and does not react to Quit; answer the prompt first.
 
-**The app seems frozen on first launch.** A Keychain dialog ("Claude Safe Storage") may be hidden behind other windows. Find it and click **Always Allow**; **Allow** only works once. Ad-hoc-signed copies (profiles built without `setup`) ask on every launch.
+**The app seems frozen on first launch.** A Keychain dialog ("Claude Safe Storage") may be hidden behind other windows. Find it and click **Always Allow**; **Allow** only works once. It comes back after each rebuild, not on every launch.
 
 **Keychain or permission prompts come back after `recolor` (or `check` says "mixed signature").** The outer app was signed ad-hoc while its helpers still carry a certificate, which changes the app's identity for macOS. Run `claude-profiles check <slug>`; if it names a mixed signature, unlock the login keychain and run `claude-profiles resign <slug>` (add `claude-profiles set <slug> sign-identity "<Something> Signing"` first if the certificate is not detected). `recolor` and `launcher` now refuse to create this state; `adopt` keeps the signature of the copy it registers.
 

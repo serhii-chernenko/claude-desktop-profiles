@@ -13,7 +13,7 @@ All commands are zsh. Replace the placeholders in the variables block once, then
 **Only the human can do these. Stop, tell the user exactly what to do, and wait:**
 
 1. **`claude-profiles setup`** (signing identity import, trust prompt, key partition list, `launchctl bootstrap`). It needs the login password and cannot run in a sandboxed or auto-mode agent. Never run it for the user and never run its individual `security` or `launchctl` steps by hand. Ask the user to open Terminal and run `<repo>/bin/claude-profiles setup`.
-2. **The Keychain prompt** for "Claude Safe Storage" on the first launch of a new copy: the user must click **Always Allow**. Likewise macOS privacy prompts (microphone, screen recording, accessibility).
+2. **The Keychain prompt** for "Claude Safe Storage" on the first launch of a new copy and again after every rebuild or recolor (it asks for the login keychain password): the user must click **Always Allow**. Likewise macOS privacy prompts (microphone, screen recording, accessibility).
 3. **Pinning the profile to the Dock**: drag `/Applications/Claude <Name>.app` onto the Dock, or right-click its icon, Options, Keep in Dock. In self mode that is the app itself; in launcher mode it is the launcher, and the copy in the hidden folder `/Applications/.claude-profiles` is never pinned. `migrate-layout` refreshes or repoints existing pins by itself; `dock <slug> fix --dry-run` previews it (`show --plain` prints a `dock` row, `copy_pinned` or `old_launcher_pinned` when it is needed).
 4. **Signing in** to the new account inside the new copy.
 
@@ -426,7 +426,7 @@ codesign -dvv "$APP" 2>&1 | grep -E "Authority|Signature|Identifier"
 mdfind "kMDItemCFBundleIdentifier == \"$BUNDLE_ID\"" | grep -qF "$APP" && echo "WARN the copy is indexed by Spotlight" || echo "OK the copy is hidden from Spotlight"
 ```
 
-`Signature=adhoc` means no stable identity: acceptable, but the user will see Keychain prompts after every rebuild until they run `setup`.
+`Signature=adhoc` means no stable identity: acceptable, but the user will see privacy prompts after every rebuild until they run `setup`. The Keychain prompt after a rebuild comes back either way, because a build without an Apple Team ID is recognized only by its code hash.
 
 After the user has launched the copy through the launcher once:
 
