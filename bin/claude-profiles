@@ -719,8 +719,8 @@ identity_sign_target() {
     for line in $matches; do
       [[ ${${line#*$'\t'}%%$'\t'*} == 1 ]] && valid+=( "$line" )
     done
-    (( ${#valid} == 1 )) || return 2
-    matches=( "$valid[1]" )
+    (( ${#valid} <= 1 )) || return 2
+    (( ${#valid} == 0 )) || matches=( "$valid[1]" )
   fi
   line=$matches[1]
   print -r -- "${line%%$'\t'*}"$'\t'"${line#*$'\t'*$'\t'}"
@@ -3773,6 +3773,8 @@ cmd_setup() {
     say "Identity \"$SIGN_IDENTITY\" already exists"
   elif is_identity_hash "$SIGN_IDENTITY" || is_apple_issued_name "$SIGN_IDENTITY"; then
     die "$(missing_issued_identity_text "$SIGN_IDENTITY")"
+  elif [[ ! $SIGN_IDENTITY =~ '^[A-Za-z0-9 ._-]+$' ]]; then
+    die "No identity \"$SIGN_IDENTITY\" in the login keychain. setup creates self-signed identities only with letters, digits, space, dot, underscore and dash in the name; pick such a name, or use an existing certificate."
   else
     create_identity
   fi
@@ -3821,7 +3823,11 @@ cmd_setup() {
   say ""
   say "macOS will prompt once more per copy for microphone / screen recording / accessibility, if it uses them."
   say "Future automatic rebuilds keep the same signature, so those permissions carry over."
-  say "The Keychain asks for \"Claude Safe Storage\" after every rebuild: enter your login keychain password and click Always Allow."
+  if is_apple_issued_name "$(identity_sign_target "$SIGN_IDENTITY" 2>/dev/null | cut -f2)"; then
+    say "The Keychain asks for \"Claude Safe Storage\" once on the first launch with this certificate: enter your login keychain password and click Always Allow."
+  else
+    say "The Keychain asks for \"Claude Safe Storage\" after every rebuild: enter your login keychain password and click Always Allow."
+  fi
   (( failed == 0 )) || die "$failed build(s) failed."
 }
 
