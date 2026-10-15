@@ -774,7 +774,7 @@ choose_sign_id() {
   if [[ $SIGN_IDENTITY == - && -z $PROFILE_SIGN_IDENTITY ]]; then
     say "Signing: ad-hoc (SIGN_IDENTITY=-)"
   else
-    warn "No usable signing identity (\"${PROFILE_SIGN_IDENTITY:-$SIGN_IDENTITY}\" not found): falling back to ad-hoc signing (Keychain/TCC re-prompts after every rebuild). Run in Terminal: claude-profiles setup"
+    warn "No usable signing identity (\"${PROFILE_SIGN_IDENTITY:-$SIGN_IDENTITY}\" not found): falling back to ad-hoc signing (privacy permissions re-prompt after every rebuild). Run in Terminal: claude-profiles setup"
   fi
 }
 
@@ -3073,7 +3073,7 @@ cmd_check() {
   elif [[ -n $SIGN_BLOCKED ]]; then
     warnl "signing identity \"$SIGN_BLOCKED\" is in the keychain but a test signature failed: unlock the login keychain or run in Terminal: claude-profiles setup"
   elif [[ $SIGN_IDENTITY == - && -z $PROFILE_SIGN_IDENTITY ]]; then
-    infol "SIGN_IDENTITY is ad-hoc (-): every rebuild re-prompts Keychain/TCC"
+    infol "SIGN_IDENTITY is ad-hoc (-): every rebuild re-prompts privacy permissions"
   else
     warnl "signing identity \"${PROFILE_SIGN_IDENTITY:-$SIGN_IDENTITY}\" not found: run in Terminal: claude-profiles setup"
   fi
@@ -3084,7 +3084,7 @@ cmd_check() {
       fail "mixed signature: $NAME is signed ad-hoc but its nested code is signed by \"$nested_identity\", which is not usable. Unlock the login keychain then run: claude-profiles resign $SLUG (or: claude-profiles set $SLUG sign-identity NAME)"
     fi
   elif [[ $SIGN_ID != - && $outer_authority == "$SIGN_ID" ]]; then
-    ok "$NAME is signed by \"$SIGN_ID\" (stable signature, no re-prompts on rebuild)"
+    ok "$NAME is signed by \"$SIGN_ID\" (stable signature: privacy permissions survive rebuilds; the Keychain still asks once per build)"
   elif grep -q 'Signature=adhoc' <<<"$sig"; then
     warnl "$NAME is signed ad-hoc: re-prompts on rebuild. If a permission toggle in System Settings turns itself off, run: claude-profiles reset-permissions $SLUG"
   else
@@ -3692,9 +3692,9 @@ cmd_setup() {
     open "$l" || true
   done
   say ""
-  say "macOS will prompt ONE last time per copy: Keychain access to \"Claude Safe Storage\" (click Always Allow),"
-  say "and possibly microphone / screen recording / accessibility for the copy."
-  say "Future automatic rebuilds keep the same signature, so no more prompts."
+  say "macOS will prompt once more per copy for microphone / screen recording / accessibility, if it uses them."
+  say "Future automatic rebuilds keep the same signature, so those permissions carry over."
+  say "The Keychain asks for \"Claude Safe Storage\" after every rebuild: enter your login keychain password and click Always Allow."
   (( failed == 0 )) || die "$failed build(s) failed."
 }
 

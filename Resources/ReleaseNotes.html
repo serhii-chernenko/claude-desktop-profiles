@@ -1,6 +1,7 @@
-<h2>Claude Profiles 0.1.1</h2>
+<h2>Claude Profiles 0.1.2</h2>
 <ul>
-  <li>Releases are now signed with a stable certificate instead of ad-hoc. macOS keeps the Accessibility permission across updates instead of silently dropping it.</li>
-  <li>Check for Claude Updates asks macOS for the Accessibility permission itself, so Claude Profiles shows up in the list again after it was removed.</li>
-  <li>The permission is named the way macOS 27 shows it: Device Control and Data Access. There is also a fix for when the switch is already on but the permission does not work.</li>
+  <li>When a rebuild, recolor or re-sign changes a profile's signature, its macOS privacy permissions are reset. Grants that no longer match the app are cleared, so a Files &amp; Folders switch (for example access to Google Chrome's data) no longer turns itself off.</li>
+  <li>New Reset Permissions… on the profile page (and <code>claude-profiles reset-permissions</code>) for profiles that are already affected.</li>
+  <li>The Keychain prompt for "Claude Safe Storage" after each rebuild is now explained correctly: a self-signed certificate has no Apple Team ID, so macOS asks once for every new build. Enter your login keychain password and click Always Allow.</li>
+  <li>Update the command-line tool under Setup &amp; Settings so the auto-rebuild agent uses this version.</li>
 </ul>

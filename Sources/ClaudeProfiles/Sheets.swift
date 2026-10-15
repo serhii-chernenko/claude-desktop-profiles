@@ -58,7 +58,7 @@ struct AdoptSheet: View {
                 VStack(alignment: .leading, spacing: 3) {
                     TextField("Signing identity (optional)", text: $identity, prompt: Text("Leave empty if the copy is not signed with a certificate"))
                     Text(PlainParser.isValidIdentity(identity)
-                         ? "Keeps the existing signature so macOS doesn't ask for Keychain or permissions again."
+                         ? "Keeps the existing signature so macOS doesn't ask for permissions again."
                          : "Use only letters, digits, space, dot, underscore and dash.")
                         .font(.caption)
                         .foregroundStyle(PlainParser.isValidIdentity(identity) ? Color.secondary : Color.red)
