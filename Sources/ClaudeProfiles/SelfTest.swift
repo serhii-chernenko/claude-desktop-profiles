@@ -172,6 +172,9 @@ enum SelfTest {
         expect(PlainParser.created("Created profile\ncreated\twork\t-")?.slug == "work", "created row parser")
         expect(PlainParser.slugify("  My Work Profile! ") == "my-work-profile", "slugify matches the CLI")
         expect(PlainParser.isValidName("Work") && !PlainParser.isValidName(" Work") && !PlainParser.isValidName("a/b"), "name validation")
+        let acceptedIdentities = ["", "-", "Claude Profiles Signing", "Apple Development: Example Person (ABCDE12345)", "Apple Development: Zoë O'Example-Person (ABCDE12345)", "0123456789abcdef0123456789abcdef01234567"]
+        let rejectedIdentities = ["a\"b", "a\\b", "a$b", "a`b", "a\tb", "a\nb", "-x", String(repeating: "x", count: 201)]
+        expect(acceptedIdentities.allSatisfy(PlainParser.isValidIdentity) && !rejectedIdentities.contains(where: PlainParser.isValidIdentity), "identity validation accepts Apple Development names and SHA-1 hashes, rejects quotes, backslashes, $, backticks and control characters")
         expect(Color(hex: "#3a7bd5")?.hexString == "#3a7bd5", "hex color round trip")
         ownerChecks()
         homeChecks()

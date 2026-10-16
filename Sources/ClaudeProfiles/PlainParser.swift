@@ -254,6 +254,10 @@ enum PlainParser {
     }
 
     static func isValidIdentity(_ identity: String) -> Bool {
-        identity.isEmpty || identity.range(of: "^[A-Za-z0-9 ._-]+$", options: .regularExpression) != nil
+        let trimmed = identity.trimmingCharacters(in: .whitespaces)
+        if trimmed.isEmpty || trimmed == "-" { return true }
+        guard trimmed.count <= 200, !trimmed.hasPrefix("-") else { return false }
+        guard !trimmed.unicodeScalars.contains(where: CharacterSet.controlCharacters.contains) else { return false }
+        return !trimmed.contains(where: { "\"\\`$".contains($0) })
     }
 }

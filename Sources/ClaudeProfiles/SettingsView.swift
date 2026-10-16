@@ -204,7 +204,7 @@ struct SettingsView: View {
         } header: {
             Text("Auto-rebuild and signing")
         } footer: {
-            Text("When Claude updates, the agent rebuilds every profile that is not running. A stable signing identity keeps privacy permissions across rebuilds; the Keychain still asks once after each one.")
+            Text("When Claude updates, the agent rebuilds every profile that is not running. A stable signing identity keeps privacy permissions across rebuilds. With the default self-signed certificate the Keychain still asks once after each one; an Apple Development certificate avoids that.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
         }

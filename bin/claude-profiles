@@ -17,7 +17,7 @@
 #   dock <slug> fix [--yes] [--dry-run] [--pin]   keep one Dock pin per profile (the app in self mode, else the launcher):
 #                                       drop or repoint pins of the hidden copy or an old launcher; --pin adds it when missing
 #   resign <slug>                       re-sign only the outer bundle (and the launcher) with the resolved identity
-#   set <slug> sign-identity NAME|--clear   pin the signing identity of one profile
+#   set <slug> sign-identity NAME|SHA-1|--clear   pin the signing identity of one profile
 #   reset-permissions <slug> [--service NAME] [--yes]   reset the app's macOS privacy permissions (all, or one
 #                                       tccutil service such as SystemPolicyAppDataDetailed) when grants stopped matching
 #   prune-permissions [--dry-run] [--yes]   clear privacy permissions left by profile apps that no longer exist
@@ -27,11 +27,11 @@
 #   link <slug>|main                    send claude:// links to a profile (reverts after LINK_TTL) or back
 #   remove <slug> [--delete-data] [--delete-config] [--yes]
 #   adopt --slug s --name N --app PATH [--launcher PATH] [--data-dir P] [--config-dir P]
-#         [--identity NAME] [--color '#hex'] [--dir PATH]...
+#         [--identity NAME|SHA-1] [--color '#hex'] [--dir PATH]...
 #   projects <slug> list [--plain]      session history inside the profile's config dir
 #   projects <slug> add [--mode symlink|move|copy] [--no-dir] [--yes] CWD...
 #                                       bring Claude Code history for CWD into an existing profile
-#   setup [--identity NAME]             run once in Terminal: signing identity + auto-rebuild agent
+#   setup [--identity NAME|SHA-1]       run once in Terminal: signing identity + auto-rebuild agent
 #   status [--plain]                    CLI install, signing identity, agent, source app, claude:// handler
 #   install-cli [--from DIR] [--prefix DIR] [--share-dir DIR] [--bin-dir DIR]
 #                                       copy this CLI to ~/.local/share/claude-profiles and link ~/.local/bin
@@ -105,6 +105,7 @@ MAIN_CONFIG_DIR=$HOME/.claude
 MAIN_DATA_DIR="$HOME/Library/Application Support/Claude"
 MAIN_LOGS_DIR="$HOME/Library/Logs/Claude"
 DEFAULT_IDENTITY="Claude Profiles Signing"
+IDENTITY_RULE="a certificate name without quotes, backslashes, \$, backticks or control characters, or its SHA-1 hash"
 DEFAULT_SOURCE_TEAM_ID=Q6L2SF6YDW
 DEFAULT_AGENT_LABEL=io.github.claude-desktop-profiles.rebuild
 DEFAULT_PALETTE=('#3a7bd5' '#2ecc71' '#9b59b6' '#e67e22' '#e84393' '#16a085' '#f1c40f' '#c0392b')
@@ -124,8 +125,10 @@ PLAIN=0
 YES=0
 DRY=0
 SIGN_ID=-
+SIGN_NAME=-
 SIGN_SOURCE=adhoc
 SIGN_BLOCKED=
+SIGN_AMBIGUOUS=
 IS_AUTO=${CLAUDE_PROFILES_AUTO:-0}
 PARENT_LOCK=${CLAUDE_PROFILES_LOCKED:-0}
 LOCK_HELD=0
@@ -259,7 +262,7 @@ load_config() {
     die "APPS_DIR ($APPS_DIR) must differ from the launcher folder ($LAUNCHER_DIR): the copy and its launcher would share one path."
   fi
   [[ $LINK_TTL == <-> ]] || LINK_TTL=900
-  valid_identity "$SIGN_IDENTITY" || die "SIGN_IDENTITY in $CONFIG_FILE must be - or use only letters, digits, space, dot, underscore and dash."
+  valid_identity "$SIGN_IDENTITY" || die "SIGN_IDENTITY in $CONFIG_FILE must be - or $IDENTITY_RULE."
   [[ -z $SOURCE_TEAM_ID || $SOURCE_TEAM_ID =~ '^[A-Z0-9]{10}$' ]] || die "SOURCE_TEAM_ID in $CONFIG_FILE must be empty or a 10-character Team ID."
   valid_mode_choice "$BUILD_MODE" || die "CLAUDE_PROFILES_APP_MODE must be self or launcher (got \"$BUILD_MODE\")."
   AGENT_PLIST=$AGENTS_DIR/$AGENT_LABEL.plist
@@ -344,7 +347,25 @@ valid_name() {
 }
 
 valid_identity() {
-  [[ $1 == - || $1 =~ '^[A-Za-z0-9 ._-]+$' ]]
+  [[ $1 == - ]] && return 0
+  has_control_chars "$1" && return 1
+  (( ${#1} <= 200 )) && [[ $1 == [^-[:space:]]* && $1 == *[^[:space:]] && $1 != *[\"\\\`\$]* ]]
+}
+
+is_identity_hash() {
+  [[ $1 =~ '^[0-9A-Fa-f]{40}$' ]]
+}
+
+normalize_identity() {
+  if is_identity_hash "$1"; then
+    print -r -- "${(U)1}"
+  else
+    print -r -- "$1"
+  fi
+}
+
+is_apple_issued_name() {
+  [[ $1 == (Apple Development|Apple Distribution|Mac Developer|Developer ID Application|3rd Party Mac Developer Application):\ * ]]
 }
 
 valid_mode_choice() {
@@ -681,19 +702,57 @@ sanitize_ents() {
   $PB -c Print "$1" 2>/dev/null | grep -q '^    [^ }]'
 }
 
+keychain_identities() {
+  security find-identity -p codesigning "$KEYCHAIN" 2>/dev/null | awk '
+    /Valid identities only/ { valid = 1 }
+    /^ *[0-9]+\) [0-9A-F]+ "/ && length($2) == 40 {
+      name = $0
+      sub(/^ *[0-9]+\) [0-9A-F]+ "/, "", name)
+      sub(/"[^"]*$/, "", name)
+      if (!($2 in seen) || valid) seen[$2] = (valid + 0) "\t" name
+    }
+    END { for (h in seen) print h "\t" seen[h] }' | sort
+}
+
+identity_matches() {
+  local want
+  [[ ${1:-} != - ]] || return 0
+  want=$(normalize_identity "$1")
+  keychain_identities | IDENTITY_WANTED=$want awk -F'\t' '$1 == ENVIRON["IDENTITY_WANTED"] || $3 == ENVIRON["IDENTITY_WANTED"]'
+}
+
+identity_sign_target() {
+  local line
+  local -a matches valid
+  matches=( ${(f)"$(identity_matches "$1")"} )
+  (( ${#matches} )) || return 1
+  if (( ${#matches} > 1 )); then
+    for line in $matches; do
+      [[ ${${line#*$'\t'}%%$'\t'*} == 1 ]] && valid+=( "$line" )
+    done
+    (( ${#valid} <= 1 )) || return 2
+    (( ${#valid} == 0 )) || matches=( "$valid[1]" )
+  fi
+  line=$matches[1]
+  print -r -- "${line%%$'\t'*}"$'\t'"${line#*$'\t'*$'\t'}"
+}
+
 identity_present() {
   local name=${1:-$SIGN_IDENTITY}
-  [[ $name != - ]] && security find-certificate -c "$name" "$KEYCHAIN" >/dev/null 2>&1
+  [[ $name != - ]] || return 1
+  [[ -n $(identity_matches "$name") ]] && return 0
+  ! is_identity_hash "$name" && select_identity_cert "$name" "$TMP/identity-present.pem"
+}
+
+sign_probe_ok() {
+  local probe="$TMP/sign-probe"
+  cp -f /usr/bin/true "$probe"
+  codesign --force --sign "$1" --timestamp=none "$probe" </dev/null >/dev/null 2>&1
 }
 
 probe_identity() {
-  local name=${1:-$SIGN_IDENTITY} probe="$TMP/sign-probe"
-  if ! identity_present "$name"; then
-    print -- -
-    return 0
-  fi
-  cp /usr/bin/true "$probe"
-  if codesign --force --sign "$name" --timestamp=none "$probe" </dev/null >/dev/null 2>&1; then
+  local name=${1:-$SIGN_IDENTITY} target
+  if identity_present "$name" && target=$(identity_sign_target "$name") && sign_probe_ok "${target%%$'\t'*}"; then
     print -r -- "$name"
   else
     print -- -
@@ -714,7 +773,7 @@ first_authority() {
 }
 
 vendor_authority() {
-  [[ $1 == (Developer ID|Apple|Mac Developer|Software Signing|Apple Development|Apple Distribution)* ]]
+  [[ $1 != (Apple Development|Mac Developer):\ * && $1 == (Developer ID|Apple|Mac Developer|Software Signing)* ]]
 }
 
 app_signing_identity() {
@@ -742,11 +801,13 @@ usable_app_identity() {
 }
 
 resolve_sign_identity() {
-  local name i nested
+  local name i nested target rc
   local -a names sources
   SIGN_ID=-
+  SIGN_NAME=-
   SIGN_SOURCE=adhoc
   SIGN_BLOCKED=
+  SIGN_AMBIGUOUS=
   if [[ -n $PROFILE_SIGN_IDENTITY ]]; then
     names+=( "$PROFILE_SIGN_IDENTITY" )
     sources+=( "profile setting" )
@@ -762,11 +823,15 @@ resolve_sign_identity() {
     [[ $name != - ]] || continue
     valid_identity "$name" || { warn "Ignoring signing identity \"$name\" ($sources[i]): unsupported characters."; continue }
     identity_present "$name" || continue
-    if [[ $(probe_identity "$name") == "$name" ]]; then
-      SIGN_ID=$name
+    rc=0
+    target=$(identity_sign_target "$name") || rc=$?
+    if (( rc == 0 )) && sign_probe_ok "${target%%$'\t'*}"; then
+      SIGN_ID=${target%%$'\t'*}
+      SIGN_NAME=${target#*$'\t'}
       SIGN_SOURCE=$sources[i]
       return 0
     fi
+    (( rc != 2 )) || [[ -n $SIGN_AMBIGUOUS ]] || SIGN_AMBIGUOUS=$name
     [[ -n $SIGN_BLOCKED ]] || SIGN_BLOCKED=$name
   done
   return 0
@@ -775,8 +840,11 @@ resolve_sign_identity() {
 choose_sign_id() {
   resolve_sign_identity
   if [[ $SIGN_ID != - ]]; then
-    say "Signing identity: $SIGN_ID ($SIGN_SOURCE)"
+    say "Signing identity: $SIGN_NAME ($SIGN_SOURCE)"
     return 0
+  fi
+  if [[ -n $SIGN_AMBIGUOUS ]]; then
+    die "$(ambiguous_identity_text "$SIGN_AMBIGUOUS")"
   fi
   if [[ -n $SIGN_BLOCKED ]]; then
     die "Identity \"$SIGN_BLOCKED\" is in the keychain but a test signature failed (locked keychain or key access?). Not falling back to ad-hoc signing. Unlock the login keychain or run: claude-profiles setup"
@@ -787,6 +855,10 @@ choose_sign_id() {
   else
     warn "No usable signing identity (\"${PROFILE_SIGN_IDENTITY:-$SIGN_IDENTITY}\" not found): falling back to ad-hoc signing (privacy permissions re-prompt after every rebuild). Run in Terminal: claude-profiles setup"
   fi
+}
+
+ambiguous_identity_text() {
+  print -r -- "Several valid certificates in the login keychain are named \"$1\", so codesign cannot tell them apart. Pin one by its SHA-1 hash (listed by: security find-identity -v -p codesigning): claude-profiles set ${SLUG:-<slug>} sign-identity <SHA-1>, or for all profiles: claude-profiles setup --identity <SHA-1>"
 }
 
 refuse_mixed_signature() {
@@ -2101,8 +2173,8 @@ stale_reason() {
   if [[ $SIGN_ID != - ]]; then
     local signature
     signature=$(codesign -dvv "$PROFILE_APP" 2>&1 || true)
-    if ! grep -qxF "Authority=$SIGN_ID" <<<"$signature"; then
-      print -r -- "copy is not signed by \"$SIGN_ID\" (ad-hoc, mixed or other) although the identity is usable"
+    if ! grep -qxF "Authority=$SIGN_NAME" <<<"$signature"; then
+      print -r -- "copy is not signed by \"$SIGN_NAME\" (ad-hoc, mixed or other) although the identity is usable"
       return 0
     fi
   fi
@@ -2942,30 +3014,36 @@ cmd_set() {
       --yes|-y) YES=1; shift ;;
       --plain) PLAIN=1; shift ;;
       --clear) value=""; have_value=1; shift ;;
-      -*) usage_error "set <slug> sign-identity NAME|--clear" ;;
+      -*) usage_error "set <slug> sign-identity NAME|SHA-1|--clear" ;;
       *)
         if [[ -z $slug ]]; then slug=$1
         elif [[ -z $key ]]; then key=$1
         elif (( ! have_value )); then value=$1; have_value=1
-        else usage_error "set <slug> sign-identity NAME|--clear"
+        else usage_error "set <slug> sign-identity NAME|SHA-1|--clear"
         fi
         shift ;;
     esac
   done
-  [[ -n $slug && -n $key ]] && (( have_value )) || usage_error "set <slug> sign-identity NAME|--clear"
+  [[ -n $slug && -n $key ]] && (( have_value )) || usage_error "set <slug> sign-identity NAME|SHA-1|--clear"
   [[ $key == sign-identity ]] || usage_error "set: unknown setting \"$key\" (only sign-identity)"
   setup_colors
   reject_control_chars "set value" "$value"
   profile_load "$slug"
   if [[ -n $value ]]; then
-    [[ $value != - ]] && valid_identity "$value" || usage_error "invalid identity \"$value\" (letters, digits, space, dot, underscore, dash)"
+    [[ $value != - ]] && valid_identity "$value" || usage_error "invalid identity \"$value\" ($IDENTITY_RULE)"
+    value=$(normalize_identity "$value")
     identity_present "$value" || warn "Identity \"$value\" is not in the login keychain yet; it is ignored until it is."
   fi
   need_lock
   PROFILE_SIGN_IDENTITY=$value
   profile_save
   if [[ -n $value ]]; then
-    say "Signing identity of \"$SLUG\" is now \"$value\". Apply it to the existing copy: claude-profiles resign $SLUG"
+    local target nested
+    if [[ -d $PROFILE_APP ]] && target=$(identity_sign_target "$value" 2>/dev/null) && nested=$(app_signing_identity "$PROFILE_APP") && [[ $nested == "${target#*$'\t'}" ]]; then
+      say "Signing identity of \"$SLUG\" is now \"$value\". Apply it to the existing copy: claude-profiles resign $SLUG"
+    else
+      say "Signing identity of \"$SLUG\" is now \"$value\". Apply it with a full rebuild (resign keeps the nested signatures): claude-profiles build $SLUG"
+    fi
   else
     say "Signing identity of \"$SLUG\" is automatic again."
   fi
@@ -3246,7 +3324,9 @@ cmd_check() {
   nested_identity=$(app_signing_identity "$DST" || true)
   resolve_sign_identity
   if [[ $SIGN_ID != - ]]; then
-    ok "signing identity \"$SIGN_ID\" is usable ($SIGN_SOURCE)"
+    ok "signing identity \"$SIGN_NAME\" is usable ($SIGN_SOURCE)"
+  elif [[ -n $SIGN_AMBIGUOUS ]]; then
+    warnl "$(ambiguous_identity_text "$SIGN_AMBIGUOUS")"
   elif [[ -n $SIGN_BLOCKED ]]; then
     warnl "signing identity \"$SIGN_BLOCKED\" is in the keychain but a test signature failed: unlock the login keychain or run in Terminal: claude-profiles setup"
   elif [[ $SIGN_IDENTITY == - && -z $PROFILE_SIGN_IDENTITY ]]; then
@@ -3260,12 +3340,16 @@ cmd_check() {
     else
       fail "mixed signature: $NAME is signed ad-hoc but its nested code is signed by \"$nested_identity\", which is not usable. Unlock the login keychain then run: claude-profiles resign $SLUG (or: claude-profiles set $SLUG sign-identity NAME)"
     fi
-  elif [[ $SIGN_ID != - && $outer_authority == "$SIGN_ID" ]]; then
-    ok "$NAME is signed by \"$SIGN_ID\" (stable signature: privacy permissions survive rebuilds; the Keychain still asks once per build)"
+  elif [[ $SIGN_ID != - && $outer_authority == "$SIGN_NAME" ]]; then
+    if is_apple_issued_name "$SIGN_NAME"; then
+      ok "$NAME is signed by \"$SIGN_NAME\" (stable signature with a Team ID: privacy permissions and Keychain access survive rebuilds)"
+    else
+      ok "$NAME is signed by \"$SIGN_NAME\" (stable signature: privacy permissions survive rebuilds; the Keychain still asks once per build)"
+    fi
   elif grep -q 'Signature=adhoc' <<<"$sig"; then
     warnl "$NAME is signed ad-hoc: re-prompts on rebuild. If a permission toggle in System Settings turns itself off, run: claude-profiles reset-permissions $SLUG"
   else
-    warnl "$NAME is signed by \"${outer_authority:-unknown}\", not by the resolved identity \"$SIGN_ID\""
+    warnl "$NAME is signed by \"${outer_authority:-unknown}\", not by the resolved identity \"$SIGN_NAME\""
   fi
   if launchctl print "gui/$(id -u)/$AGENT_LABEL" >/dev/null 2>&1; then
     ok "LaunchAgent $AGENT_LABEL is loaded"
@@ -3529,12 +3613,13 @@ cmd_adopt() {
       *) usage_error "adopt: unknown option $1" ;;
     esac
   done
-  [[ -n $slug && -n $name && -n $app ]] || usage_error "adopt --slug s --name N --app PATH [--launcher PATH] [--data-dir P] [--config-dir P] [--identity NAME] [--color '#hex'] [--dir PATH]..."
+  [[ -n $slug && -n $name && -n $app ]] || usage_error "adopt --slug s --name N --app PATH [--launcher PATH] [--data-dir P] [--config-dir P] [--identity NAME|SHA-1] [--color '#hex'] [--dir PATH]..."
   setup_colors
   reject_control_chars "adopt options" "$app" "$launcher" "$data_dir" "$config_dir" "$identity" "$color" "${dirs[@]}"
   valid_slug "$slug" || usage_error "invalid slug \"$slug\""
   valid_name "$name" || usage_error "invalid name \"$name\""
-  valid_identity "${identity:--}" || usage_error "invalid identity \"$identity\" (letters, digits, space, dot, underscore, dash)"
+  valid_identity "${identity:--}" || usage_error "invalid identity \"$identity\" ($IDENTITY_RULE)"
+  identity=$(normalize_identity "$identity")
   local flag dir_value
   for flag dir_value in --data-dir "$data_dir" --config-dir "$config_dir"; do
     [[ -n $dir_value ]] || continue
@@ -3673,8 +3758,13 @@ cert_has_cn() {
   return 1
 }
 
+missing_issued_identity_text() {
+  print -r -- "No signing identity \"$1\" (certificate with its private key) in the login keychain. This tool creates only self-signed identities; an Apple Development certificate comes from Xcode: Xcode > Settings > Accounts, add your Apple ID, select the team, Manage Certificates, + > Apple Development. Then list it with: security find-identity -v -p codesigning"
+}
+
 select_identity_cert() {
   local name=$1 out=$2 all="$TMP/identity-all.pem" part
+  rm -f -- "$TMP"/identity-cert-*.pem(N)
   security find-certificate -a -c "$name" -p "$KEYCHAIN" > "$all" || return 1
   awk -v prefix="$TMP/identity-cert-" '/-----BEGIN CERTIFICATE-----/ { n++ } n { print > (prefix n ".pem") }' "$all"
   for part in "$TMP"/identity-cert-*.pem(N); do
@@ -3686,9 +3776,38 @@ select_identity_cert() {
   return 1
 }
 
+identity_cert_by_hash() {
+  security find-certificate -a -Z -p "$KEYCHAIN" 2>/dev/null | IDENTITY_HASH=$1 awk '
+    /^SHA-1 hash: / { keep = ($3 == ENVIRON["IDENTITY_HASH"]); next }
+    keep { print }
+    keep && /-----END CERTIFICATE-----/ { exit }' > "$2"
+  [[ -s $2 ]]
+}
+
+cert_self_signed() {
+  local subject issuer
+  subject=$(/usr/bin/openssl x509 -noout -subject -nameopt RFC2253 -in "$1" 2>/dev/null) || return 1
+  issuer=$(/usr/bin/openssl x509 -noout -issuer -nameopt RFC2253 -in "$1" 2>/dev/null) || return 1
+  [[ ${subject#subject=} == "${issuer#issuer=}" ]]
+}
+
 trust_identity() {
-  local cert="$TMP/identity-trust.pem"
-  select_identity_cert "$SIGN_IDENTITY" "$cert" || die "no certificate with the exact name \"$SIGN_IDENTITY\" found in the login keychain"
+  local cert="$TMP/identity-trust.pem" target rc=0
+  target=$(identity_sign_target "$SIGN_IDENTITY") || rc=$?
+  (( rc != 2 )) || die "$(ambiguous_identity_text "$SIGN_IDENTITY")"
+  if (( rc == 0 )); then
+    identity_cert_by_hash "${target%%$'\t'*}" "$cert" || die "could not read the certificate of \"$SIGN_IDENTITY\" from the login keychain"
+  else
+    select_identity_cert "$SIGN_IDENTITY" "$cert" || die "no certificate with the exact name \"$SIGN_IDENTITY\" found in the login keychain"
+  fi
+  if ! cert_self_signed "$cert"; then
+    if security verify-cert -c "$cert" -p codeSign >/dev/null 2>&1; then
+      say "Certificate is issued by Apple and trusted for code signing"
+    else
+      warn "Certificate \"$SIGN_IDENTITY\" is not self-signed and macOS does not trust it for code signing (expired, revoked, or the Apple intermediate certificate is missing; Xcode installs it). No custom trust is added for it."
+    fi
+    return 0
+  fi
   if security verify-cert -c "$cert" -p codeSign >/dev/null 2>&1; then
     say "Certificate is already trusted for code signing"
     return 0
@@ -3704,9 +3823,11 @@ allow_codesign_noninteractive() {
   fi
   say "Test signature failed: codesign is not allowed to use the private key without a prompt."
   say "Granting it access now; macOS asks for your LOGIN KEYCHAIN password (this tool never sees it)."
-  security set-key-partition-list -S apple-tool:,apple:,codesign: -s -l "$SIGN_IDENTITY" "$KEYCHAIN"
+  local label=$SIGN_IDENTITY target
+  target=$(identity_sign_target "$SIGN_IDENTITY") && label=${target#*$'\t'}
+  security set-key-partition-list -S apple-tool:,apple:,codesign: -s -l "$label" "$KEYCHAIN" || true
   if [[ $(probe_sign_id) != "$SIGN_IDENTITY" ]]; then
-    die "codesign still cannot sign with \"$SIGN_IDENTITY\" non-interactively. Check Keychain Access: the certificate must be trusted for Code Signing and its private key must exist."
+    die "codesign still cannot sign with \"$SIGN_IDENTITY\" non-interactively. Check Keychain Access: the certificate must be trusted for Code Signing and its private key must exist; for a certificate from Xcode, open its private key > Access Control and allow /usr/bin/codesign, or click Always Allow when codesign asks."
   fi
   say "Non-interactive test signature OK"
 }
@@ -3806,17 +3927,21 @@ cmd_setup() {
   while (( $# )); do
     case $1 in
       --identity) need_value "$@"; identity=$2; shift 2 ;;
-      *) usage_error "setup [--identity NAME]" ;;
+      *) usage_error "setup [--identity NAME|SHA-1]" ;;
     esac
   done
   setup_colors
   [[ -t 0 && -t 1 ]] || die "setup is interactive: run it in your own Terminal."
   [[ -d $SOURCE_APP ]] || die "Not found: $SOURCE_APP"
   reject_control_chars "--identity" "$identity"
-  valid_identity "${identity:--}" || usage_error "invalid identity \"$identity\" (letters, digits, space, dot, underscore, dash)"
+  valid_identity "${identity:--}" || usage_error "invalid identity \"$identity\" ($IDENTITY_RULE)"
   assert_agent_path_trusted
   ensure_config
   if [[ -n $identity ]]; then
+    identity=$(normalize_identity "$identity")
+    if ! identity_present "$identity" && { is_identity_hash "$identity" || is_apple_issued_name "$identity" }; then
+      die "$(missing_issued_identity_text "$identity")"
+    fi
     SIGN_IDENTITY=$identity
   elif [[ $SIGN_IDENTITY == - ]]; then
     SIGN_IDENTITY=$DEFAULT_IDENTITY
@@ -3824,8 +3949,12 @@ cmd_setup() {
   save_config
   acquire_lock || die "Another claude-profiles run is in progress ($LOCK_DIR)."
 
-  if security find-certificate -c "$SIGN_IDENTITY" "$KEYCHAIN" >/dev/null 2>&1; then
+  if identity_present "$SIGN_IDENTITY"; then
     say "Identity \"$SIGN_IDENTITY\" already exists"
+  elif is_identity_hash "$SIGN_IDENTITY" || is_apple_issued_name "$SIGN_IDENTITY"; then
+    die "$(missing_issued_identity_text "$SIGN_IDENTITY")"
+  elif [[ ! $SIGN_IDENTITY =~ '^[A-Za-z0-9 ._-]+$' ]]; then
+    die "No identity \"$SIGN_IDENTITY\" in the login keychain. setup creates self-signed identities only with letters, digits, space, dot, underscore and dash in the name; pick such a name, or use an existing certificate."
   else
     create_identity
   fi
@@ -3874,7 +4003,11 @@ cmd_setup() {
   say ""
   say "macOS will prompt once more per copy for microphone / screen recording / accessibility, if it uses them."
   say "Future automatic rebuilds keep the same signature, so those permissions carry over."
-  say "The Keychain asks for \"Claude Safe Storage\" after every rebuild: enter your login keychain password and click Always Allow."
+  if is_apple_issued_name "$(identity_sign_target "$SIGN_IDENTITY" 2>/dev/null | cut -f2)"; then
+    say "The Keychain asks for \"Claude Safe Storage\" once on the first launch with this certificate: enter your login keychain password and click Always Allow."
+  else
+    say "The Keychain asks for \"Claude Safe Storage\" after every rebuild: enter your login keychain password and click Always Allow."
+  fi
   (( failed == 0 )) || die "$failed build(s) failed."
 }
 
