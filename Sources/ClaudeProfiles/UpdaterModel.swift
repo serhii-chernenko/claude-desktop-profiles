@@ -8,13 +8,24 @@ final class UpdaterModel: ObservableObject {
     @Published private(set) var lastCheckDate: Date?
     @Published private(set) var automaticallyChecks = false
     @Published private(set) var automaticallyDownloads = false
+    @Published private(set) var downloadedUpdateVersion: String?
 
+    private let delegate = UpdaterDelegate()
     private let controller: SPUStandardUpdaterController
+    private var installDownloadedUpdate: (() -> Void)?
     private var subscriptions = Set<AnyCancellable>()
 
     init() {
-        controller = SPUStandardUpdaterController(startingUpdater: true, updaterDelegate: nil, userDriverDelegate: nil)
+        controller = SPUStandardUpdaterController(startingUpdater: false, updaterDelegate: delegate, userDriverDelegate: nil)
+        delegate.onUpdateDownloaded = { [weak self] version, install in
+            self?.downloadedUpdateVersion = version
+            self?.installDownloadedUpdate = install
+        }
+        controller.startUpdater()
         let updater = controller.updater
+        if updater.automaticallyChecksForUpdates {
+            updater.checkForUpdatesInBackground()
+        }
         canCheckForUpdates = updater.canCheckForUpdates
         lastCheckDate = updater.lastUpdateCheckDate
         automaticallyChecks = updater.automaticallyChecksForUpdates
@@ -41,6 +52,10 @@ final class UpdaterModel: ObservableObject {
         controller.checkForUpdates(nil)
     }
 
+    func installDownloadedUpdateNow() {
+        installDownloadedUpdate?()
+    }
+
     func setAutomaticallyChecks(_ enabled: Bool) {
         controller.updater.automaticallyChecksForUpdates = enabled
         automaticallyChecks = enabled
@@ -49,5 +64,17 @@ final class UpdaterModel: ObservableObject {
     func setAutomaticallyDownloads(_ enabled: Bool) {
         controller.updater.automaticallyDownloadsUpdates = enabled
         automaticallyDownloads = enabled
+    }
+}
+
+final class UpdaterDelegate: NSObject, SPUUpdaterDelegate {
+    var onUpdateDownloaded: (@MainActor (String, @escaping () -> Void) -> Void)?
+
+    nonisolated func updater(_ updater: SPUUpdater, willInstallUpdateOnQuit item: SUAppcastItem, immediateInstallationBlock immediateInstallHandler: @escaping () -> Void) -> Bool {
+        MainActor.assumeIsolated {
+            guard let onUpdateDownloaded else { return false }
+            onUpdateDownloaded(item.displayVersionString, immediateInstallHandler)
+            return true
+        }
     }
 }

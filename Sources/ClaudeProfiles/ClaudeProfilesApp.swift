@@ -16,10 +16,16 @@ struct AppCommands: Commands {
             Button("About Claude Profiles") {
                 AboutWindowController.shared.show(updater: updater)
             }
-            Button("Check for Updates…") {
-                updater.checkForUpdates()
+            if let version = updater.downloadedUpdateVersion {
+                Button("Restart to Install \(version)") {
+                    updater.installDownloadedUpdateNow()
+                }
+            } else {
+                Button("Check for Updates…") {
+                    updater.checkForUpdates()
+                }
+                .disabled(!updater.canCheckForUpdates)
             }
-            .disabled(!updater.canCheckForUpdates)
         }
         CommandGroup(replacing: .newItem) {
             Button("New Profile…") {

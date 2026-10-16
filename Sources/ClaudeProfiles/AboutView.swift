@@ -57,10 +57,16 @@ struct AboutView: View {
                     Label("MIT License", systemImage: "doc.text")
                 }
             }
-            Button("Check for Updates…") {
-                updater.checkForUpdates()
+            if let version = updater.downloadedUpdateVersion {
+                Button("Restart to Install \(version)") {
+                    updater.installDownloadedUpdateNow()
+                }
+            } else {
+                Button("Check for Updates…") {
+                    updater.checkForUpdates()
+                }
+                .disabled(!updater.canCheckForUpdates)
             }
-            .disabled(!updater.canCheckForUpdates)
             Text("Not affiliated with Anthropic")
                 .font(.caption)
                 .foregroundStyle(.secondary)

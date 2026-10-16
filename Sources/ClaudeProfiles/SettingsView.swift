@@ -86,11 +86,19 @@ struct SettingsView: View {
         Section {
             LabeledContent("Version", value: AppInfo.versionDescription)
             LabeledContent("Last checked", value: updater.lastCheckDate.map(Self.lastCheckFormatter.string(from:)) ?? "Never")
-            ActionRow(title: "Check for updates",
-                      caption: "Looks for a newer Claude Profiles on GitHub. Updates are verified with a signature before they are installed.",
-                      systemImage: "arrow.down.circle") {
-                Button("Check Now") { updater.checkForUpdates() }
-                    .disabled(!updater.canCheckForUpdates)
+            if let version = updater.downloadedUpdateVersion {
+                ActionRow(title: "Claude Profiles \(version) is ready",
+                          caption: "Downloaded and verified. It installs when you quit Claude Profiles, or restart now to install it.",
+                          systemImage: "checkmark.circle") {
+                    Button("Restart Now") { updater.installDownloadedUpdateNow() }
+                }
+            } else {
+                ActionRow(title: "Check for updates",
+                          caption: "Looks for a newer Claude Profiles on GitHub. Updates are verified with a signature before they are installed.",
+                          systemImage: "arrow.down.circle") {
+                    Button("Check Now") { updater.checkForUpdates() }
+                        .disabled(!updater.canCheckForUpdates)
+                }
             }
             Toggle("Check automatically", isOn: Binding(
                 get: { updater.automaticallyChecks },
@@ -104,7 +112,7 @@ struct SettingsView: View {
         } header: {
             Text("Updates")
         } footer: {
-            Text("While the app is open it checks about once a day. No system information is sent.")
+            Text("It checks each time the app opens and about once a day while it stays open. No system information is sent.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
         }
