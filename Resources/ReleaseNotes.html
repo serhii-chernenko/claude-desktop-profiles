@@ -1,7 +1,7 @@
-<h2>Claude Profiles 0.1.2</h2>
+<h2>Claude Profiles 0.1.3</h2>
 <ul>
-  <li>When a rebuild, recolor or re-sign changes a profile's signature, its macOS privacy permissions are reset. Grants that no longer match the app are cleared, so a Files &amp; Folders switch (for example access to Google Chrome's data) no longer turns itself off.</li>
-  <li>New Reset Permissions… on the profile page (and <code>claude-profiles reset-permissions</code>) for profiles that are already affected.</li>
-  <li>The Keychain prompt for "Claude Safe Storage" after each rebuild is now explained correctly: a self-signed certificate has no Apple Team ID, so macOS asks once for every new build. Enter your login keychain password and click Always Allow.</li>
+  <li>Removing a profile now also clears its macOS privacy permissions, so its Claude &lt;Name&gt; entries no longer stay behind in System Settings &gt; Privacy &amp; Security.</li>
+  <li>New <code>claude-profiles prune-permissions</code> clears entries that profiles removed earlier left behind. Run it once from a terminal that has Full Disk Access; after that, removing a profile and the auto-rebuild agent clean up by themselves whenever they can read the privacy database.</li>
+  <li>Claude's own permissions and those of profiles that still exist are never touched.</li>
   <li>Update the command-line tool under Setup &amp; Settings so the auto-rebuild agent uses this version.</li>
 </ul>
