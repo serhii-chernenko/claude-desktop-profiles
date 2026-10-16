@@ -20,6 +20,8 @@
 #   set <slug> sign-identity NAME|--clear   pin the signing identity of one profile
 #   reset-permissions <slug> [--service NAME] [--yes]   reset the app's macOS privacy permissions (all, or one
 #                                       tccutil service such as SystemPolicyAppDataDetailed) when grants stopped matching
+#   prune-permissions [--dry-run] [--yes]   clear privacy permissions left by profile apps that no longer exist
+#                                       (reads the privacy database, so it needs Full Disk Access)
 #   recolor <slug> [--color '#hex'|--hue DEG|--pick-color]
 #   check <slug>                        post-launch checks
 #   link <slug>|main                    send claude:// links to a profile (reverts after LINK_TTL) or back
@@ -55,7 +57,9 @@
 # the mode `new` and `build` use), CLAUDE_PROFILES_DOCK_PLIST (a plist file that `dock`, `show`, `check`, `build`,
 # `migrate-layout` and `remove` read and write instead of the real Dock; the Dock is not restarted),
 # CLAUDE_PROFILES_LSREGISTER (the lsregister tool used to register and unregister apps),
-# CLAUDE_PROFILES_TCCUTIL (the tccutil tool used to reset privacy permissions).
+# CLAUDE_PROFILES_TCCUTIL (the tccutil tool used to reset privacy permissions),
+# CLAUDE_PROFILES_TCC_DATABASES (colon-separated TCC.db files that `prune-permissions` reads),
+# CLAUDE_PROFILES_TCC_STUB_ROOT (where stub bundles for resetting removed apps are made; not under /tmp).
 #
 setopt extended_glob
 set -euo pipefail
@@ -83,6 +87,10 @@ LOG_FILE=${CLAUDE_PROFILES_LOG:-$HOME/Library/Logs/claude-profiles.log}
 PB=/usr/libexec/PlistBuddy
 LSREG=${CLAUDE_PROFILES_LSREGISTER:-/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister}
 TCCUTIL=${CLAUDE_PROFILES_TCCUTIL:-/usr/bin/tccutil}
+TCCUTIL_UNKNOWN_BUNDLE=64
+TCC_STUB_ROOT=${CLAUDE_PROFILES_TCC_STUB_ROOT:-$HOME/Library/Caches/claude-profiles/tcc-stubs}
+TCC_DATABASES=( ${(s.:.)${CLAUDE_PROFILES_TCC_DATABASES:-/Library/Application Support/com.apple.TCC/TCC.db:$HOME/Library/Application Support/com.apple.TCC/TCC.db}} )
+STUB_DIRS=()
 KEYCHAIN=$HOME/Library/Keychains/login.keychain-db
 AGENTS_DIR=${CLAUDE_PROFILES_AGENTS_DIR:-$HOME/Library/LaunchAgents}
 DEFAULT_APPS_DIR=/Applications/.claude-profiles
@@ -165,6 +173,9 @@ cleanup() {
       [[ -n $p ]] && rm -rf -- "$p"
     done
   fi
+  for p in "${STUB_DIRS[@]}"; do
+    [[ -n $p ]] && remove_stub "$p"
+  done
   release_lock
   if [[ -n $TMP && -d $TMP ]]; then
     rm -rf -- "$TMP"
@@ -841,6 +852,137 @@ reset_permissions_after_signing() {
   else
     warn "The signature of $name changed, but resetting its macOS privacy permissions failed. Earlier grants no longer match it; run: claude-profiles reset-permissions $SLUG"
   fi
+}
+
+forget_permissions() {
+  local id rc
+  for id in "$@"; do
+    [[ -n $id ]] || continue
+    reserved_bundle_id "$id" && continue
+    rc=0
+    "$TCCUTIL" reset All "$id" >/dev/null 2>&1 || rc=$?
+    if (( rc == TCCUTIL_UNKNOWN_BUNDLE )); then
+      rc=0
+      reset_through_stub "$id" || rc=$?
+    fi
+    (( rc == 0 )) || warn "Could not clear the macOS privacy permissions of $id (tccutil exit $rc); System Settings may keep a stale entry for it."
+  done
+  return 0
+}
+
+source_bundle_ids() {
+  local plist id
+  (( ${+SOURCE_BUNDLE_IDS} )) && return 0
+  typeset -ga SOURCE_BUNDLE_IDS=()
+  [[ -d $SOURCE_APP ]] || return 0
+  for plist in "$SOURCE_APP"/Contents/Info.plist(N.) "$SOURCE_APP"/Contents/**/(Contents|Resources)/Info.plist(N.); do
+    id=$(plutil -extract CFBundleIdentifier raw "$plist" 2>/dev/null) || continue
+    [[ -n $id ]] && SOURCE_BUNDLE_IDS+=( ${(L)id} )
+  done
+  return 0
+}
+
+reserved_bundle_id() {
+  local id=${(L)1} prefix=${(L)BUNDLE_ID_PREFIX}
+  [[ $id == $prefix || $id == $prefix.helper || $id == $prefix.helper.* || $id == ${(L)$(src_id)} ]] && return 0
+  source_bundle_ids
+  (( ${SOURCE_BUNDLE_IDS[(Ie)$id]} ))
+}
+
+bundle_installed() {
+  local found
+  found=$(osascript -l JavaScript -e 'function run(argv) { ObjC.import("AppKit"); return $.NSWorkspace.sharedWorkspace.URLForApplicationWithBundleIdentifier(argv[0]).isNil() ? "missing" : "installed" }' "$1" 2>/dev/null) || return 0
+  [[ $found != missing ]]
+}
+
+reset_through_stub() {
+  local id=$1 dir app plist rc=0
+  bundle_installed "$id" && return 0
+  mkdir -p -- "$TCC_STUB_ROOT" || return 1
+  dir=$(mktemp -d "$TCC_STUB_ROOT/stub.XXXXXX") || return 1
+  STUB_DIRS+=( "$dir" )
+  app=$dir/Stale.app
+  plist=$app/Contents/Info.plist
+  if mkdir -p -- "$app/Contents/MacOS" &&
+    print -r -- $'#!/bin/sh\nexit 0' > "$app/Contents/MacOS/stub" &&
+    chmod +x "$app/Contents/MacOS/stub" &&
+    plutil -create xml1 "$plist" &&
+    plutil -insert CFBundleIdentifier -string "$id" "$plist" &&
+    plutil -insert CFBundlePackageType -string APPL "$plist" &&
+    plutil -insert CFBundleExecutable -string stub "$plist"; then
+    "$LSREG" -f -R "$app" >/dev/null 2>&1 || true
+    "$TCCUTIL" reset All "$id" >/dev/null 2>&1 || rc=$?
+  else
+    rc=1
+  fi
+  remove_stub "$dir"
+  STUB_DIRS=( ${STUB_DIRS:#${(b)dir}} )
+  return $rc
+}
+
+remove_stub() {
+  "$LSREG" -u "$1/Stale.app" >/dev/null 2>&1 || true
+  rm -rf -- "$1" || true
+  rmdir -- "$TCC_STUB_ROOT" "${TCC_STUB_ROOT:h}" 2>/dev/null || true
+}
+
+tcc_profile_clients() {
+  local db out prefix=${BUNDLE_ID_PREFIX//\'/\'\'} readable=1
+  reply=()
+  for db in $TCC_DATABASES; do
+    [[ -r $db ]] || continue
+    out=$(sqlite3 -readonly "$db" "select distinct client from access where client_type = 0 and client like '$prefix.%';" 2>/dev/null) || continue
+    readable=0
+    reply+=( ${(f)out} )
+  done
+  return $readable
+}
+
+live_bundle_ids() {
+  local SLUG ${PROFILE_KEYS[@]} s
+  local -a PROFILE_DIRS slugs
+  all_slugs
+  slugs=( $reply )
+  reply=()
+  for s in $slugs; do
+    profile_load "$s"
+    [[ -z $PROFILE_BUNDLE_ID ]] || reply+=( ${(L)PROFILE_BUNDLE_ID} ${(L)PROFILE_BUNDLE_ID}.launcher )
+  done
+  return 0
+}
+
+orphan_bundle_ids() {
+  local id lower base
+  local -a clients live
+  ORPHAN_IDS=()
+  tcc_profile_clients || return 1
+  clients=( ${(u)reply} )
+  (( ${#clients} )) || return 0
+  live_bundle_ids
+  live=( $reply )
+  for id in $clients; do
+    lower=${(L)id}
+    [[ $lower == ${(L)BUNDLE_ID_PREFIX}.* ]] || continue
+    base=${${lower#${(L)BUNDLE_ID_PREFIX}.}%.launcher}
+    valid_slug "$base" || continue
+    (( ${live[(Ie)$lower]} )) && continue
+    reserved_bundle_id "$id" && continue
+    bundle_installed "$id" && continue
+    ORPHAN_IDS+=( "$id" )
+  done
+  return 0
+}
+
+prune_permissions_quietly() {
+  local id report=${1:-say}
+  local -a ORPHAN_IDS
+  orphan_bundle_ids || return 0
+  for id in $ORPHAN_IDS; do
+    if reset_through_stub "$id"; then
+      $report "Cleared the stale macOS privacy permissions of $id (its app no longer exists)."
+    fi
+  done
+  return 0
 }
 
 assert_ours() {
@@ -1877,6 +2019,7 @@ build_profile() {
     remove_replaced_app "$old_app" "$PROFILE_BUNDLE_ID"
   fi
   if [[ $mode == self && -n $old_launcher ]] && ! same_path "$old_launcher" "$DST"; then
+    [[ ! -e $old_launcher ]] || forget_permissions "$LID"
     remove_replaced_app "$old_launcher" "$LID"
   fi
   if (( ! IS_AUTO )); then
@@ -2923,6 +3066,40 @@ warn_if_installed_cli_stale() {
   warnl "installed command-line tool is out of date: run claude-profiles install-cli (or click Install/Update in Settings)"
 }
 
+cmd_prune_permissions() {
+  local dry=0 id failed=0
+  local -a ORPHAN_IDS
+  while (( $# )); do
+    case $1 in
+      --dry-run) dry=1; shift ;;
+      --yes|-y) YES=1; shift ;;
+      *) usage_error "prune-permissions [--dry-run] [--yes]" ;;
+    esac
+  done
+  setup_colors
+  orphan_bundle_ids || die "Could not read the macOS privacy database. Run this from an app that has Full Disk Access (System Settings > Privacy & Security > Full Disk Access), for example your terminal."
+  if (( ! ${#ORPHAN_IDS} )); then
+    say "No stale macOS privacy permissions left by removed profiles."
+    return 0
+  fi
+  say "Stale macOS privacy permissions of apps that no longer exist:"
+  for id in $ORPHAN_IDS; do
+    say "  $id"
+  done
+  (( dry )) && return 0
+  confirm "Clear them?" || { say "Cancelled."; return 0; }
+  need_lock
+  for id in $ORPHAN_IDS; do
+    if reset_through_stub "$id"; then
+      say "Cleared $id"
+    else
+      warn "Could not clear $id."
+      failed=1
+    fi
+  done
+  return $failed
+}
+
 cmd_check() {
   local target=""
   while (( $# )); do
@@ -3262,6 +3439,7 @@ cmd_remove() {
   elif (( PROFILE_DESKTOP )); then
     summary+=", ${PROFILE_APP:t} and ${PROFILE_LAUNCHER:t}"
   fi
+  (( PROFILE_DESKTOP )) && summary+=" with its macOS privacy permissions"
   (( delete_data )) && summary+=", DELETE data dir $PROFILE_DATA_DIR"
   (( delete_config )) && summary+=", DELETE config dir $PROFILE_CONFIG_DIR"
   confirm "$summary?" || { say "Cancelled."; return 0; }
@@ -3283,6 +3461,7 @@ cmd_remove() {
     if is_self_mode && ! same_path "$APPS_DIR/${PROFILE_APP:t}" "$PROFILE_APP"; then
       leftover_hidden_copy=$APPS_DIR/${PROFILE_APP:t}
     fi
+    forget_permissions "$PROFILE_BUNDLE_ID" "$(launcher_id)"
     for app in "$PROFILE_LAUNCHER" "$PROFILE_APP" "$leftover_hidden_copy"; do
       [[ -n $app ]] || continue
       "$LSREG" -u "$app" >/dev/null 2>&1 || true
@@ -3313,6 +3492,7 @@ cmd_remove() {
   fi
   local kept_slug=$SLUG kept_data=$PROFILE_DATA_DIR kept_cfg=$PROFILE_CONFIG_DIR kept_desktop=$PROFILE_DESKTOP
   regen_rules
+  prune_permissions_quietly
   say "Removed profile \"$kept_slug\"."
   if (( kept_desktop && ! delete_data )) && [[ -e $kept_data ]]; then
     say "Kept data dir: $kept_data"
@@ -3867,6 +4047,7 @@ cmd_auto() {
     profile_load "$s"
     auto_profile || overall=1
   done
+  (( DRY )) || prune_permissions_quietly log_line
   return $overall
 }
 
@@ -4623,6 +4804,7 @@ main() {
     dock) cmd_dock "$@" ;;
     resign) cmd_resign "$@" ;;
     reset-permissions) cmd_reset_permissions "$@" ;;
+    prune-permissions) cmd_prune_permissions "$@" ;;
     set) cmd_set "$@" ;;
     recolor) cmd_recolor "$@" ;;
     check) cmd_check "$@" ;;

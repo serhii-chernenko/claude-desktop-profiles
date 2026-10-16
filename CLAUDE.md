@@ -10,6 +10,7 @@ Utility to run several Claude accounts on macOS (desktop copies with their own d
    - `adopt` registers a hand-made copy that `scan --plain` reports as a `candidate`;
    - `shell-init install` adds the shell hook to `~/.zshrc` (ask first);
    - `legacy-agents` lists old LaunchAgents that watch Claude.app.
+   - `prune-permissions --dry-run` lists privacy entries (System Settings → Privacy & Security) left by profile apps that no longer exist; `prune-permissions --yes` clears them (ask first; it needs Full Disk Access to read the privacy database).
    - `reset-permissions <slug> [--service NAME] --yes` clears the macOS privacy grants of a profile's app when a System Settings toggle turns itself off or granted access is still denied (ask first: the human grants them again).
    - `migrate-layout <slug> --yes` turns a profile whose `show --plain` says `mode launcher` into self mode: one app at `/Applications/Claude <Name>.app` whose `app.asar` boot file selects the data dir, no launcher, no hidden copy ([docs/how-it-works.md](docs/how-it-works.md), fact 13). Ask first, it needs the copy quit. New profiles and a plain `build` use self mode too; never patch `app.asar` by hand. It also refreshes the Dock pin; `dock <slug> fix --dry-run` shows what `dock <slug> fix --yes` changes when `show --plain` prints a `dock` row of `copy_pinned` or `old_launcher_pinned`.
 3. If the CLI fails or is missing, follow [docs/for-claude.md](docs/for-claude.md) step by step.
