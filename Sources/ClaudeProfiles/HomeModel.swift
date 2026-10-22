@@ -41,9 +41,10 @@ struct HomeEnvironment {
         HomeEnvironment(
             isRunning: { runningPaths.contains(standardizedPath($0)) },
             appVersion: { path in
-                guard let bundle = Bundle(path: path),
-                      let short = bundle.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String else { return nil }
-                guard let build = bundle.object(forInfoDictionaryKey: "CFBundleVersion") as? String else { return short }
+                let infoPlist = URL(fileURLWithPath: path).appendingPathComponent("Contents/Info.plist")
+                guard let info = NSDictionary(contentsOf: infoPlist),
+                      let short = info["CFBundleShortVersionString"] as? String else { return nil }
+                guard let build = info["CFBundleVersion"] as? String else { return short }
                 return "\(short) (\(build))"
             },
             fileExists: { FileManager.default.fileExists(atPath: $0) }
