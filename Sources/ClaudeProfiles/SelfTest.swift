@@ -71,6 +71,11 @@ enum SelfTest {
         let home = root + "/home"
         let settings = root + "/settings"
         do {
+            try liveVersionChecks(root: root)
+        } catch {
+            failures.append("live version fixture failed: \(error)")
+        }
+        do {
             try integrationChecks(script: script, root: root, home: home, settings: settings)
         } catch {
             failures.append("fixture setup failed: \(error)")
@@ -272,6 +277,24 @@ enum SelfTest {
         expect(MainActor.assumeIsolated { model.setupNeeded }, "a model with a missing agent and identity asks for setup")
         MainActor.assumeIsolated { model.status = good }
         expect(MainActor.assumeIsolated { !model.setupNeeded }, "a model with everything set up stops asking")
+    }
+
+    private static func liveVersionChecks(root: String) throws {
+        let fileManager = FileManager.default
+        func makeApp(_ path: String, version: String) throws {
+            try fileManager.createDirectory(atPath: path + "/Contents", withIntermediateDirectories: true)
+            let info: NSDictionary = ["CFBundleShortVersionString": version, "CFBundleVersion": version]
+            try info.write(to: URL(fileURLWithPath: path + "/Contents/Info.plist"))
+        }
+        let app = root + "/swap/Claude Swap.app"
+        let staged = root + "/swap/Claude Swap.staged.app"
+        try makeApp(app, version: "1.0")
+        try makeApp(staged, version: "2.0")
+        let environment = HomeEnvironment.live(runningPaths: [])
+        expect(environment.appVersion(app) == "1.0 (1.0)", "the live version reader reads short and build versions from Info.plist")
+        try fileManager.removeItem(atPath: app)
+        try fileManager.moveItem(atPath: staged, toPath: app)
+        expect(environment.appVersion(app) == "2.0 (2.0)", "the live version reader sees a rebuilt app swapped in at the same path")
     }
 
     private static func integrationChecks(script: URL, root: String, home: String, settings: String) throws {
