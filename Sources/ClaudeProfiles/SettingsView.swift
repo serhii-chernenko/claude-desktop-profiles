@@ -92,6 +92,13 @@ struct SettingsView: View {
                           systemImage: "checkmark.circle") {
                     Button("Restart Now") { updater.installDownloadedUpdateNow() }
                 }
+            } else if let version = updater.availableUpdateVersion {
+                ActionRow(title: "Claude Profiles \(version) is available",
+                          caption: "Shows what is new and installs it after a signature check.",
+                          systemImage: "arrow.down.circle") {
+                    Button("Update…") { updater.checkForUpdates() }
+                        .disabled(!updater.canCheckForUpdates)
+                }
             } else {
                 ActionRow(title: "Check for updates",
                           caption: "Looks for a newer Claude Profiles on GitHub. Updates are verified with a signature before they are installed.",

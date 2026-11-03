@@ -4,6 +4,7 @@ import SwiftUI
 
 struct ContentView: View {
     @EnvironmentObject var model: AppModel
+    @EnvironmentObject var updater: UpdaterModel
 
     private static let periodicRefresh = Timer.publish(every: 30, on: .main, in: .common).autoconnect()
 
@@ -30,6 +31,18 @@ struct ContentView: View {
         .navigationTitle("Claude Profiles")
         .toolbar {
             ToolbarItemGroup(placement: .primaryAction) {
+                if let version = updater.pendingUpdateVersion {
+                    Button {
+                        updater.showPendingUpdate()
+                    } label: {
+                        Label(updater.downloadedUpdateVersion != nil ? "Restart to Update" : "Update to \(version)",
+                              systemImage: "arrow.down.circle.fill")
+                            .labelStyle(.titleAndIcon)
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .help("Claude Profiles \(version) is available")
+                    .disabled(updater.downloadedUpdateVersion == nil && !updater.canCheckForUpdates)
+                }
                 if model.isRefreshing && !model.isBusy {
                     ProgressView()
                         .controlSize(.small)
@@ -155,9 +168,26 @@ struct ProfileStackGlyph: View {
 
 struct NoticeStack: View {
     @EnvironmentObject var model: AppModel
+    @EnvironmentObject var updater: UpdaterModel
 
     var body: some View {
         VStack(spacing: 0) {
+            if let version = updater.downloadedUpdateVersion {
+                NoticeBar(systemImage: "arrow.down.circle.fill", tint: .accentColor,
+                          title: "Claude Profiles \(version) is ready",
+                          text: "Downloaded and verified. It installs when you quit Claude Profiles, or restart now to install it.") {
+                    Button("Restart Now") { updater.installDownloadedUpdateNow() }
+                        .buttonStyle(.borderedProminent)
+                }
+            } else if let version = updater.availableUpdateVersion {
+                NoticeBar(systemImage: "arrow.down.circle.fill", tint: .accentColor,
+                          title: "Claude Profiles \(version) is available",
+                          text: "You have \(AppInfo.version). See what is new and install it.") {
+                    Button("Update…") { updater.checkForUpdates() }
+                        .buttonStyle(.borderedProminent)
+                        .disabled(!updater.canCheckForUpdates)
+                }
+            }
             if model.cliMissing {
                 NoticeBar(systemImage: "exclamationmark.triangle.fill", tint: .red,
                           title: "The bundled command-line tool is missing",
@@ -172,6 +202,13 @@ struct NoticeStack: View {
                           title: "Claude.app was not found in Applications",
                           text: "Terminal-only profiles still work. Desktop profiles need Claude.app installed to build or rebuild.")
             }
+        }
+        .alert(updater.readyPromptVersion.map { "Claude Profiles \($0) is ready" } ?? "Update ready",
+               isPresented: Binding(get: { updater.readyPromptVersion != nil }, set: { if !$0 { updater.readyPromptVersion = nil } })) {
+            Button("Restart Now") { updater.installDownloadedUpdateNow() }
+            Button("Later", role: .cancel) {}
+        } message: {
+            Text("The update is downloaded and verified. Restart now to install it, or it installs when you quit Claude Profiles.")
         }
     }
 }
