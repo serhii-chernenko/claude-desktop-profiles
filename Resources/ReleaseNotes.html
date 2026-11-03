@@ -1,4 +1,5 @@
-<h2>Claude Profiles 0.1.5</h2>
+<h2>Claude Profiles 0.1.6</h2>
 <ul>
-  <li>After a profile is rebuilt, its card now shows Up to date right away. Before, it kept showing Rebuild needed until Claude Profiles was restarted.</li>
+  <li>Profiles work again with Claude 4.4212 and later. These Claude builds add a second integrity check, which made new self-mode copies refuse to start, so rebuilds fell back to the older launcher layout. Claude Profiles now updates that check when it builds a copy, and Check reports whether it matches.</li>
+  <li>If the Dock icon of a profile opens the app copy itself, the copy starts on the main account. The background agent now tells you once and suggests <code>claude-profiles dock &lt;slug&gt; fix</code>. When it reopens such a copy, it also confirms that the copy came back on its own profile.</li>
 </ul>

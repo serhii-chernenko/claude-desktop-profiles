@@ -119,6 +119,8 @@ ASAR_INTEGRITY_KEY=Resources/app.asar
 ASAR_FUSE_SENTINEL=dL7pKGdnNz796PbbjQWNKmHXBZaB9tsX
 ASAR_FUSE_WIRE_VERSION=1
 ASAR_FUSE_COUNT=9
+ASAR_DIGEST_SENTINEL=AGbevlPCksUGKNL8TSn7wGmJEuJsXb2A
+ASAR_DIGEST_VERSION=1
 
 PLAIN=0
 YES=0
@@ -1079,12 +1081,22 @@ asar_entry_ok() {
   [[ $(sha256_of "$out") == $ASAR_E_HASH ]]
 }
 
+asar_framework() {
+  print -r -- "$1/Contents/Frameworks/Electron Framework.framework/Electron Framework"
+}
+
+asar_integrity_keys() {
+  local dump
+  dump=$($PB -c "Print :ElectronAsarIntegrity" "$1/Contents/Info.plist" 2>/dev/null) || return 1
+  print -r -- "$dump" | awk '/^    [^ ].* = Dict \{$/ { sub(/^    /, ""); sub(/ = Dict \{$/, ""); print }' | LC_ALL=C sort
+}
+
 asar_plist_hash() {
-  local plist=$1/Contents/Info.plist dump hash
+  local plist=$1/Contents/Info.plist out hash
   local -a keys
-  dump=$($PB -c "Print :ElectronAsarIntegrity" "$plist" 2>/dev/null) || return 1
-  keys=( ${(f)"$(print -r -- "$dump" | awk '/^    [^ ].* = Dict \{$/ { sub(/^    /, ""); sub(/ = Dict \{$/, ""); print }')"} )
-  (( ${#keys} == 1 )) && [[ $keys[1] == $ASAR_INTEGRITY_KEY ]] || return 1
+  out=$(asar_integrity_keys "$1") || return 1
+  keys=( ${(f)out} )
+  (( ${keys[(Ie)$ASAR_INTEGRITY_KEY]} )) || return 1
   [[ $($PB -c "Print :ElectronAsarIntegrity:${ASAR_INTEGRITY_KEY}:algorithm" "$plist" 2>/dev/null) == $ASAR_ALGORITHM ]] || return 1
   hash=$($PB -c "Print :ElectronAsarIntegrity:${ASAR_INTEGRITY_KEY}:hash" "$plist" 2>/dev/null) || return 1
   [[ $hash =~ '^[0-9a-f]{64}$' ]] || return 1
@@ -1092,8 +1104,9 @@ asar_plist_hash() {
 }
 
 asar_fuse_wire() {
-  local framework="$1/Contents/Frameworks/Electron Framework.framework/Electron Framework" start version count wire
+  local framework start version count wire
   local -a hits
+  framework=$(asar_framework "$1")
   [[ -f $framework ]] || return 1
   hits=( ${(f)"$(LC_ALL=C grep -a -b -o -F -- "$ASAR_FUSE_SENTINEL" "$framework" 2>/dev/null || true)"} )
   (( ${#hits} == 1 )) || return 1
@@ -1107,6 +1120,86 @@ asar_fuse_wire() {
   print -r -- "$version:$count:$wire"
 }
 
+asar_digest_slots() {
+  local framework hit start head
+  local -a bytes
+  framework=$(asar_framework "$1")
+  [[ -f $framework ]] || return 0
+  for hit in ${(f)"$(LC_ALL=C grep -a -b -o -F -- "$ASAR_DIGEST_SENTINEL" "$framework" 2>/dev/null || true)"}; do
+    [[ -n $hit ]] || continue
+    start=$(( ${hit%%:*} + ${#ASAR_DIGEST_SENTINEL} ))
+    head=$(od -An -t u1 -j "$start" -N 2 -- "$framework" 2>/dev/null) || return 1
+    bytes=( ${=head} )
+    (( ${#bytes} == 2 )) || return 1
+    (( bytes[1] )) || continue
+    [[ ${bytes[2]} == $ASAR_DIGEST_VERSION ]] || return 2
+    print -r -- $(( start + 2 ))
+  done
+}
+
+asar_digest_at() {
+  local hex
+  hex=$(od -An -t x1 -j "$2" -N 32 -- "$1" 2>/dev/null) || return 1
+  hex=${hex//[[:space:]]/}
+  (( ${#hex} == 64 )) || return 1
+  print -r -- "$hex"
+}
+
+asar_integrity_digest() {
+  local plist=$1/Contents/Info.plist key algorithm hash joined= out
+  local -a keys
+  keys=( ${(f)"$(asar_integrity_keys "$1")"} )
+  (( ${#keys} )) || return 1
+  for key in $keys; do
+    algorithm=$($PB -c "Print :ElectronAsarIntegrity:${key}:algorithm" "$plist" 2>/dev/null) || return 1
+    hash=$($PB -c "Print :ElectronAsarIntegrity:${key}:hash" "$plist" 2>/dev/null) || return 1
+    joined+=$key$algorithm$hash
+  done
+  out=$(print -rn -- "$joined" | shasum -a 256) || return 1
+  print -r -- "${out%% *}"
+}
+
+asar_digest_state() {
+  local app=$1 framework out want offset
+  local -a offsets
+  framework=$(asar_framework "$app")
+  if ! out=$(asar_digest_slots "$app"); then
+    print -r -- unknown
+    return 0
+  fi
+  offsets=( ${(f)out} )
+  if (( ! ${#offsets} )); then
+    print -r -- off
+    return 0
+  fi
+  want=$(asar_integrity_digest "$app" || true)
+  for offset in $offsets; do
+    if [[ -z $want || $(asar_digest_at "$framework" "$offset") != $want ]]; then
+      print -r -- mismatch
+      return 0
+    fi
+  done
+  print -r -- ok
+}
+
+asar_write_digest() {
+  local app=$1 framework out digest offset bin=$TMP/asar-digest.bin
+  local -a offsets
+  framework=$(asar_framework "$app")
+  out=$(asar_digest_slots "$app") || return 1
+  offsets=( ${(f)out} )
+  (( ${#offsets} )) || return 0
+  digest=$(asar_integrity_digest "$app") || return 1
+  print -rn -- "$digest" | xxd -r -p > "$bin" || return 1
+  [[ $(file_size "$bin") == 32 ]] || return 1
+  for offset in $offsets; do
+    dd if="$bin" of="$framework" bs=1 seek="$offset" conv=notrunc 2>/dev/null || return 1
+  done
+  for offset in $offsets; do
+    [[ $(asar_digest_at "$framework" "$offset") == $digest ]] || return 1
+  done
+}
+
 asar_validate() {
   local app=$1 work=$TMP/asar-validate plist_hash wire rc=0
   local asar=$app/Contents/Resources/app.asar
@@ -1115,7 +1208,7 @@ asar_validate() {
   rm -rf -- "$work"
   mkdir -p -- "$work"
   if ! plist_hash=$(asar_plist_hash "$app"); then
-    ASAR_REASON="Info.plist has no single SHA256 ElectronAsarIntegrity entry for $ASAR_INTEGRITY_KEY"
+    ASAR_REASON="Info.plist has no SHA256 ElectronAsarIntegrity entry for $ASAR_INTEGRITY_KEY"
     return 1
   fi
   if ! asar_read_header "$asar" "$work/header.json"; then
@@ -1151,6 +1244,16 @@ asar_validate() {
     ASAR_REASON="unknown Electron fuses (version:count:wire $wire, expected $ASAR_FUSE_WIRE_VERSION:$ASAR_FUSE_COUNT)"
     return 1
   fi
+  case $(asar_digest_state "$app") in
+    unknown)
+      ASAR_REASON="Electron Framework has an ElectronAsarIntegrity digest slot of an unknown version (this tool writes version $ASAR_DIGEST_VERSION)"
+      return 1
+      ;;
+    mismatch)
+      ASAR_REASON="the ElectronAsarIntegrity digest in Electron Framework does not match Info.plist, so this tool cannot recompute it"
+      return 1
+      ;;
+  esac
   return 0
 }
 
@@ -1205,7 +1308,8 @@ patch_asar() {
   fi
   mv -f -- "$work/app.asar" "$asar" || return 1
   $PB -c "Set :ElectronAsarIntegrity:${ASAR_INTEGRITY_KEY}:hash $ASAR_NEW_HASH" "$plist" || return 1
-  [[ $(asar_plist_hash "$app") == $ASAR_NEW_HASH ]]
+  [[ $(asar_plist_hash "$app") == $ASAR_NEW_HASH ]] || return 1
+  asar_write_digest "$app" || { warn "Could not update the ElectronAsarIntegrity digest in Electron Framework of the staged copy."; return 1; }
 }
 
 boot_config_dir() {
@@ -2079,6 +2183,10 @@ stale_reason() {
     fi
     if (( ! BOOT_HASH_OK )); then
       print -r -- "ElectronAsarIntegrity in Info.plist does not match the app.asar header"
+      return 0
+    fi
+    if [[ $(asar_digest_state "$PROFILE_APP") == (mismatch|unknown) ]]; then
+      print -r -- "the ElectronAsarIntegrity digest in Electron Framework does not match Info.plist"
       return 0
     fi
     if [[ $BOOT_DATA != "$PROFILE_DATA_DIR" ]]; then
@@ -3324,6 +3432,11 @@ check_boot_entry() {
   else
     fail "ElectronAsarIntegrity in Info.plist does not match the app.asar header: the copy will not start. Fix: claude-profiles build $SLUG"
   fi
+  case $(asar_digest_state "$DST") in
+    ok) ok "the ElectronAsarIntegrity digest in Electron Framework matches Info.plist" ;;
+    mismatch) fail "the ElectronAsarIntegrity digest in Electron Framework does not match Info.plist: the copy will not start. Fix: claude-profiles build $SLUG" ;;
+    unknown) fail "Electron Framework has an ElectronAsarIntegrity digest slot of an unknown version: the copy may not start. Fix: claude-profiles build $SLUG" ;;
+  esac
   if [[ $BOOT_DATA == "$DATA" && $BOOT_CONFIG == "$(boot_config_dir)" ]]; then
     ok "boot entry selects data dir $DATA and config dir ${BOOT_CONFIG:-~/.claude (default)}"
   else
@@ -3884,9 +3997,8 @@ cmd_uninstall_agent() {
   say "Removed LaunchAgent $AGENT_LABEL"
 }
 
-auto_fix_bare_launch() {
-  local exe pattern pid bare_pid="" name=${PROFILE_APP:t:r}
-  is_self_mode && return 0
+bare_launch_pid() {
+  local exe pattern pid bare_pid=""
   exe=$(plist_get "$PROFILE_APP" CFBundleExecutable)
   pattern="^$(re_escape "$PROFILE_APP")/Contents/MacOS/$(re_escape "${exe:-Claude}")( |\$)"
   for pid in ${(f)"$(pgrep -f "$pattern" 2>/dev/null || true)"}; do
@@ -3895,9 +4007,31 @@ auto_fix_bare_launch() {
       bare_pid=$pid
     fi
   done
+  print -r -- "$bare_pid"
+}
+
+report_copy_pinned() {
+  local name=$1 notified="$STATE_DIR/notified-dock-$SLUG"
+  if [[ $(dock_profile_state) != copy_pinned ]]; then
+    (( DRY )) || rm -f -- "$notified"
+    return 0
+  fi
+  log_line "$SLUG: the Dock pin of $name opens the app copy directly, so it starts on the MAIN profile: run claude-profiles dock $SLUG fix"
+  if (( DRY )) || [[ -e $notified ]]; then
+    return 0
+  fi
+  notify "The Dock icon of $name opens the main profile. Fix it with: claude-profiles dock $SLUG fix" "$name"
+  mkdir -p -- "$STATE_DIR" && touch -- "$notified"
+}
+
+auto_fix_bare_launch() {
+  local bare_pid waited name=${PROFILE_APP:t:r}
+  is_self_mode && return 0
+  bare_pid=$(bare_launch_pid)
   if [[ -z $bare_pid ]]; then
     return 0
   fi
+  report_copy_pinned "$name"
   if [[ ! -d $PROFILE_LAUNCHER ]]; then
     log_line "$SLUG: $name (PID $bare_pid) runs without --user-data-dir but the launcher $PROFILE_LAUNCHER does not exist: skipping, not quitting it"
     return 0
@@ -3908,13 +4042,25 @@ auto_fix_bare_launch() {
   fi
   log_line "$name (PID $bare_pid) runs without --user-data-dir (MAIN desktop profile): quitting and reopening via the launcher"
   notify "$name was opened on the wrong profile; reopening it correctly" "$name"
-  if ! quit_app "$PROFILE_BUNDLE_ID" "$PROFILE_APP"; then
-    log_line "$name did not quit within $QUIT_WAIT_SECONDS s: leaving it on the wrong profile"
+  if ! quit_app "$PROFILE_BUNDLE_ID" "$PROFILE_APP" || kill -0 "$bare_pid" 2>/dev/null; then
+    log_line "$name (PID $bare_pid) did not quit within $QUIT_WAIT_SECONDS s: leaving it on the wrong profile"
     notify "$name is on the wrong profile and did not quit: quit it and reopen it via the launcher" "$name"
     return 0
   fi
   open "$PROFILE_LAUNCHER" || true
-  log_line "reopened $name via the launcher"
+  for waited in {1..$QUIT_WAIT_SECONDS}; do
+    sleep 1
+    is_running "$PROFILE_APP" || continue
+    if [[ -z $(bare_launch_pid) ]]; then
+      log_line "reopened $name via the launcher"
+      return 0
+    fi
+    log_line "$name came back without --user-data-dir after reopening via the launcher: still on the MAIN profile"
+    notify "$name is still on the wrong profile: quit it and reopen it via the launcher" "$name"
+    return 0
+  done
+  log_line "$name did not start within $QUIT_WAIT_SECONDS s after reopening via the launcher"
+  notify "$name was quit because it was on the wrong profile but did not reopen: open it via the launcher" "$name"
 }
 
 auto_restore_links() {

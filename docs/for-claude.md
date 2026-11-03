@@ -298,7 +298,7 @@ read -r OFF SIZE HASH BLOCKS BLOCK_SIZE <<<"$(osascript -l JavaScript -e "functi
 echo "package.json $(dd if="$ASAR" bs=1 skip=$(( BASE + OFF )) count="$SIZE" 2>/dev/null | shasum -a 256 | cut -d" " -f1) entry $HASH blocks $BLOCKS block size $BLOCK_SIZE"
 ```
 
-The two header lines must match, the three package.json hashes must be equal, and the block size must be 4194304. Then build with the CLI (the patch, the integrity hash, the inside-out signature and the Dock fix are all done there):
+The two header lines must match, the three package.json hashes must be equal, and the block size must be 4194304. Electron 41 and later also keep a digest of `ElectronAsarIntegrity` inside `Electron Framework`, and only the CLI recomputes and checks it ([how-it-works.md](how-it-works.md), fact 13), so do not patch `app.asar` by hand. Then build with the CLI (the patch, the integrity hash, the inside-out signature and the Dock fix are all done there):
 
 ```zsh
 bin/claude-profiles new --name "$NAME" --slug "$SLUG" --color "$COLOR" --data-dir "$DATA_DIR" --config-dir "$CONFIG_DIR" --yes
@@ -306,7 +306,7 @@ bin/claude-profiles new --name "$NAME" --slug "$SLUG" --color "$COLOR" --data-di
 
 For an existing profile use `bin/claude-profiles migrate-layout "$SLUG" --yes` (quit the copy first). If `build` prints `WARN: Self mode is not possible`, it built launcher mode instead; that is a safe result.
 
-Verify a self-mode app (`bin/claude-profiles check "$SLUG"` runs the same checks):
+Verify a self-mode app (`bin/claude-profiles check "$SLUG"` runs the same checks, plus the Electron Framework digest that these lines do not cover):
 
 ```zsh
 APP="/Applications/Claude $NAME.app"
