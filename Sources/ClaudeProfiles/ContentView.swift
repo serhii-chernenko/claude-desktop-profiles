@@ -8,6 +8,10 @@ struct ContentView: View {
 
     private static let periodicRefresh = Timer.publish(every: 30, on: .main, in: .common).autoconnect()
 
+    private var showsRefreshProgress: Bool {
+        model.isRefreshing && !model.isBusy
+    }
+
     var body: some View {
         NavigationSplitView {
             SidebarView()
@@ -43,17 +47,18 @@ struct ContentView: View {
                     .help("Claude Profiles \(version) is available")
                     .disabled(updater.downloadedUpdateVersion == nil && !updater.canCheckForUpdates)
                 }
-                if model.isRefreshing && !model.isBusy {
-                    ProgressView()
-                        .controlSize(.small)
-                        .help("Refreshing")
-                }
                 Button {
                     Task { await model.refresh() }
                 } label: {
-                    Label("Refresh", systemImage: "arrow.clockwise")
+                    if showsRefreshProgress {
+                        ProgressView()
+                            .controlSize(.small)
+                            .accessibilityLabel("Refreshing")
+                    } else {
+                        Label("Refresh", systemImage: "arrow.clockwise")
+                    }
                 }
-                .help("Reload profiles and status (⌘R)")
+                .help(showsRefreshProgress ? "Refreshing" : "Reload profiles and status (⌘R)")
                 .disabled(model.isBusy || model.isRefreshing)
                 Button {
                     model.sheet = .create

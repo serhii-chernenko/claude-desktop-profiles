@@ -76,6 +76,11 @@ enum SelfTest {
             failures.append("live version fixture failed: \(error)")
         }
         do {
+            try relaunchGuardChecks(root: root)
+        } catch {
+            failures.append("relaunch guard fixture failed: \(error)")
+        }
+        do {
             try integrationChecks(script: script, root: root, home: home, settings: settings)
         } catch {
             failures.append("fixture setup failed: \(error)")
@@ -87,6 +92,24 @@ enum SelfTest {
         }
         print("Self-test failed: \(failures.count) of \(passed + failures.count) checks")
         return 1
+    }
+
+    private static func relaunchGuardChecks(root: String) throws {
+        let finished = Process()
+        finished.executableURL = URL(fileURLWithPath: "/usr/bin/true")
+        try finished.run()
+        finished.waitUntilExit()
+        func runGuard(waitingFor pid: Int32? = nil, processName: String, marker: String) -> Bool {
+            let arguments = RelaunchGuard.arguments(waitingFor: pid ?? finished.processIdentifier, quitWaitLimit: 0, installerLabel: "",
+                                                    settleDelay: 0, processName: processName,
+                                                    opener: "/usr/bin/touch", target: marker)
+            guard let process = RelaunchGuard.start(arguments) else { return false }
+            process.waitUntilExit()
+            return FileManager.default.fileExists(atPath: marker)
+        }
+        expect(runGuard(processName: "claude-profiles-no-such-process", marker: root + "/relaunch-missing"), "the relaunch guard reopens the app when nothing relaunched it after the update")
+        expect(!runGuard(processName: ProcessInfo.processInfo.processName, marker: root + "/relaunch-running"), "the relaunch guard leaves the app alone when the update already relaunched it")
+        expect(!runGuard(waitingFor: ProcessInfo.processInfo.processIdentifier, processName: "claude-profiles-no-such-process", marker: root + "/relaunch-never-quit"), "the relaunch guard gives up without reopening when the app never quits")
     }
 
     private static func updateMenuChecks() {

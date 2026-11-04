@@ -10,6 +10,61 @@ enum UpdatePromptPolicy {
     }
 }
 
+enum RelaunchGuard {
+    static let quitWaitLimit = 60
+    static let installerWaitLimit = 120
+    static let settleDelay = 5
+    static let opener = "/usr/bin/open"
+
+    static let script = """
+    waited=0
+    while /bin/kill -0 "$1" 2>/dev/null; do
+        [ "$waited" -ge "$2" ] && exit 0
+        /bin/sleep 1
+        waited=$((waited + 1))
+    done
+    waited=0
+    while [ -n "$3" ] && [ "$waited" -lt "$4" ] && /bin/launchctl list "$3" >/dev/null 2>&1; do /bin/sleep 1; waited=$((waited + 1)); done
+    /bin/sleep "$5"
+    /usr/bin/pgrep -qx -U "$(/usr/bin/id -u)" "$6" || "$7" "$8"
+    """
+
+    static func arguments(waitingFor pid: Int32, quitWaitLimit: Int = quitWaitLimit, installerLabel: String, settleDelay: Int, processName: String, opener: String, target: String) -> [String] {
+        ["-c", script, "relaunch-guard", String(pid), String(quitWaitLimit), installerLabel, String(installerWaitLimit), String(settleDelay), processName, opener, target]
+    }
+
+    @discardableResult
+    static func start(_ arguments: [String]) -> Process? {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/bin/sh")
+        process.arguments = arguments
+        process.standardInput = FileHandle.nullDevice
+        process.standardOutput = FileHandle.nullDevice
+        process.standardError = FileHandle.nullDevice
+        do {
+            try process.run()
+            return process
+        } catch {
+            return nil
+        }
+    }
+
+    @MainActor private static var pending: Process?
+
+    @MainActor
+    static func arm() {
+        if pending?.isRunning == true { return }
+        let bundle = Bundle.main
+        let installerLabel = bundle.bundleIdentifier.map { "\($0)-sparkle-updater" } ?? ""
+        pending = start(arguments(waitingFor: ProcessInfo.processInfo.processIdentifier,
+                        installerLabel: installerLabel,
+                        settleDelay: settleDelay,
+                        processName: ProcessInfo.processInfo.processName,
+                        opener: opener,
+                        target: bundle.bundlePath))
+    }
+}
+
 @MainActor
 final class UpdaterModel: ObservableObject {
     @Published private(set) var canCheckForUpdates = false
@@ -77,7 +132,9 @@ final class UpdaterModel: ObservableObject {
     }
 
     func installDownloadedUpdateNow() {
-        installDownloadedUpdate?()
+        guard let installDownloadedUpdate else { return }
+        RelaunchGuard.arm()
+        installDownloadedUpdate()
     }
 
     func showPendingUpdate() {
