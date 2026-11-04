@@ -26,7 +26,7 @@ enum RelaunchGuard {
     waited=0
     while [ -n "$3" ] && [ "$waited" -lt "$4" ] && /bin/launchctl list "$3" >/dev/null 2>&1; do /bin/sleep 1; waited=$((waited + 1)); done
     /bin/sleep "$5"
-    /usr/bin/pgrep -qx -U "$(/usr/bin/id -u)" "$6" || "$7" "$8"
+    /usr/bin/pgrep -qax -U "$(/usr/bin/id -u)" "$6" || "$7" "$8"
     """
 
     static func arguments(waitingFor pid: Int32, quitWaitLimit: Int = quitWaitLimit, installerLabel: String, settleDelay: Int, processName: String, opener: String, target: String) -> [String] {
