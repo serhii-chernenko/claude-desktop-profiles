@@ -98,6 +98,10 @@ enum SelfTest {
         for name in rejected {
             expect(!ClaudeUpdateCheck.isUpdateMenuItem(name), "update menu matcher rejects \"\(name)\"")
         }
+        let launch = Date(timeIntervalSince1970: 1_000_000)
+        expect(UpdatePromptPolicy.promptsWhenReady(launchedAt: launch, now: launch.addingTimeInterval(20), alreadyPrompted: false), "an update that is ready right after launch is announced with a prompt")
+        expect(!UpdatePromptPolicy.promptsWhenReady(launchedAt: launch, now: launch.addingTimeInterval(20), alreadyPrompted: true), "the ready-update prompt is shown at most once per launch")
+        expect(!UpdatePromptPolicy.promptsWhenReady(launchedAt: launch, now: launch.addingTimeInterval(UpdatePromptPolicy.launchWindow + 1), alreadyPrompted: false), "an update that becomes ready later in the session only shows the banner")
         let output = "2\tClaude\t1\tAbout Claude\n2\tClaude\t2\tCheck for Updates…\n3\tFile\t1\tCheck for Update\nbroken line\nx\tFile\t1\tNope\n"
         let entries = ClaudeUpdateCheck.parseMenuEntries(output)
         expect(entries.count == 3 && entries[1] == MenuEntry(menuIndex: 2, menuName: "Claude", itemIndex: 2, itemName: "Check for Updates…"), "menu entry parser keeps well-formed rows and drops malformed ones")
