@@ -33,6 +33,10 @@ struct AppCommands: Commands {
             }
             .keyboardShortcut("n", modifiers: .command)
             .disabled(model.isBusy || model.cliMissing)
+            Button("Clean Up Storage…") {
+                model.sheet = .worktrees(nil)
+            }
+            .disabled(model.isBusy || model.cliMissing)
         }
         CommandGroup(replacing: .appSettings) {
             Button("Settings…") {

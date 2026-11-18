@@ -46,14 +46,28 @@ struct CLIRunner: Sendable {
     func run(
         _ arguments: [String],
         timeout: TimeInterval? = nil,
+        stopsOnCancel: Bool = false,
         onLine: (@Sendable (String, Bool) -> Void)? = nil
     ) async -> CommandResult {
-        await withCheckedContinuation { continuation in
-            let session = ProcessSession(onLine: onLine) { result in
-                continuation.resume(returning: result)
+        let session = ProcessSession(onLine: onLine)
+        let environment = mergedEnvironment()
+        guard stopsOnCancel else {
+            return await withCheckedContinuation { continuation in
+                session.start(executable: "/bin/zsh", arguments: ["-f", script.path] + arguments,
+                              environment: environment, timeout: timeout) { result in
+                    continuation.resume(returning: result)
+                }
             }
-            session.start(executable: "/bin/zsh", arguments: ["-f", script.path] + arguments,
-                          environment: mergedEnvironment(), timeout: timeout)
+        }
+        return await withTaskCancellationHandler {
+            await withCheckedContinuation { continuation in
+                session.start(executable: "/bin/zsh", arguments: ["-f", script.path] + arguments,
+                              environment: environment, timeout: timeout) { result in
+                    continuation.resume(returning: result)
+                }
+            }
+        } onCancel: {
+            session.cancel()
         }
     }
 
@@ -71,7 +85,7 @@ struct CLIRunner: Sendable {
 private final class ProcessSession: @unchecked Sendable {
     private let lock = NSLock()
     private let onLine: (@Sendable (String, Bool) -> Void)?
-    private let completion: (CommandResult) -> Void
+    private var completion: ((CommandResult) -> Void)?
     private let process = Process()
     private var collected: [Bool: Data] = [false: Data(), true: Data()]
     private var partial: [Bool: Data] = [false: Data(), true: Data()]
@@ -79,13 +93,53 @@ private final class ProcessSession: @unchecked Sendable {
     private var exitStatus: Int32?
     private var timedOut = false
     private var finished = false
+    private var started = false
+    private var cancelled = false
 
-    init(onLine: (@Sendable (String, Bool) -> Void)?, completion: @escaping (CommandResult) -> Void) {
+    init(onLine: (@Sendable (String, Bool) -> Void)?) {
         self.onLine = onLine
-        self.completion = completion
     }
 
-    func start(executable: String, arguments: [String], environment: [String: String], timeout: TimeInterval?) {
+    /// Stops the process and everything it spawned. Safe to call before `start`, in which case the process never runs.
+    func cancel() {
+        lock.lock()
+        cancelled = true
+        let running = started && exitStatus == nil && !finished
+        lock.unlock()
+        if running { terminateTree() }
+    }
+
+    private func terminateTree() {
+        let root = process.processIdentifier
+        let children = Self.descendants(of: root)
+        process.terminate()
+        for child in children { kill(child, SIGTERM) }
+    }
+
+    private static func descendants(of pid: Int32) -> [Int32] {
+        let lookup = Process()
+        let pipe = Pipe()
+        lookup.executableURL = URL(fileURLWithPath: "/usr/bin/pgrep")
+        lookup.arguments = ["-P", String(pid)]
+        lookup.standardOutput = pipe
+        lookup.standardError = FileHandle.nullDevice
+        guard (try? lookup.run()) != nil else { return [] }
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        lookup.waitUntilExit()
+        let direct = String(decoding: data, as: UTF8.self).split(whereSeparator: \.isNewline).compactMap { Int32($0) }
+        return direct + direct.flatMap { descendants(of: $0) }
+    }
+
+    func start(executable: String, arguments: [String], environment: [String: String], timeout: TimeInterval?,
+               completion: @escaping (CommandResult) -> Void) {
+        self.completion = completion
+        lock.lock()
+        let alreadyCancelled = cancelled
+        lock.unlock()
+        if alreadyCancelled {
+            deliver(CommandResult(status: 130, stdout: "", stderr: "cancelled", timedOut: false))
+            return
+        }
         let output = Pipe()
         let errors = Pipe()
         process.executableURL = URL(fileURLWithPath: executable)
@@ -107,6 +161,11 @@ private final class ProcessSession: @unchecked Sendable {
             deliver(CommandResult(status: 127, stdout: "", stderr: error.localizedDescription, timedOut: false))
             return
         }
+        lock.lock()
+        started = true
+        let cancelledMeanwhile = cancelled
+        lock.unlock()
+        if cancelledMeanwhile { terminateTree() }
         if let timeout {
             DispatchQueue.global().asyncAfter(deadline: .now() + timeout) { [self] in
                 expire()
@@ -195,7 +254,7 @@ private final class ProcessSession: @unchecked Sendable {
             timedOut: timedOut
         )
         lock.unlock()
-        completion(result)
+        completion?(result)
     }
 
     private func deliver(_ result: CommandResult) {
@@ -206,6 +265,6 @@ private final class ProcessSession: @unchecked Sendable {
         }
         finished = true
         lock.unlock()
-        completion(result)
+        completion?(result)
     }
 }

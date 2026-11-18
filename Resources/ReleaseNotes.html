@@ -1,5 +1,8 @@
-<h2>Claude Profiles 0.1.8</h2>
+<h2>Claude Profiles 0.1.9</h2>
 <ul>
-  <li>Restart Now always brings Claude Profiles back. When the disk is nearly full, macOS can clear the downloaded update before it is installed; the install then failed and the app stayed closed. Now it reopens on its own, checks again and downloads the update afresh.</li>
-  <li>The refresh spinner shows inside the Refresh button instead of squeezing in beside it in the toolbar.</li>
+  <li>New <b>Storage</b> window (menu <b>Clean Up Storage…</b>, or <b>Storage…</b> on a profile's page) shows everything each profile keeps on disk, with sizes, biggest first, in four tabs: Overview, Worktrees, Caches and History.</li>
+  <li>Worktrees: pick the Code tab's git worktrees to remove by age (7, 14, 30, 60 or 90 days) or one by one. A removed worktree's branch goes with it when all its commits are saved elsewhere; branches with unsaved commits stay unless you switch on <b>Delete branch</b> for that row.</li>
+  <li>Caches: clear rebuildable app caches and older Claude Code versions. The Cowork VM disk is listed too, but only removed when you select it.</li>
+  <li>History: delete the Claude Code conversation history of chosen projects for good.</li>
+  <li>The same is available in the terminal: <code>claude-profiles storage</code>, <code>worktrees</code>, <code>caches</code> and <code>history</code>, with a live progress line, size tables and <code>--dry-run</code>. Sizes are measured in parallel, about three times faster.</li>
 </ul>

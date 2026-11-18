@@ -118,6 +118,8 @@ struct SheetHost: View {
             CheckSheet(report: report)
         case .addProjects(let profile):
             AddProjectsSheet(profile: profile)
+        case .worktrees(let target):
+            WorktreesSheet(initialTarget: target)
         }
     }
 }
