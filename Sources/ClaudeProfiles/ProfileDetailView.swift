@@ -191,6 +191,14 @@ struct ProfileDetailView: View {
                     }
                     .disabled(model.isBusy || !model.sourceAppPresent)
                 }
+                ActionRow(title: "Storage",
+                          caption: "See where the space goes, then clean old Code worktrees, caches and project history, after looking at what is there. Sign-ins stay.",
+                          systemImage: "externaldrive.badge.minus") {
+                    Button("Storage…") {
+                        model.sheet = .worktrees(profile.slug)
+                    }
+                    .disabled(model.isBusy || model.cliMissing)
+                }
                 ActionRow(title: "Reset Permissions",
                           caption: "Use when a toggle in System Settings > Privacy & Security turns itself off, or macOS keeps denying access you granted. Earlier grants can stop matching after the app's signature changes.",
                           systemImage: "lock.rotation") {

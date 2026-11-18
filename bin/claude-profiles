@@ -31,6 +31,25 @@
 #   projects <slug> list [--plain]      session history inside the profile's config dir
 #   projects <slug> add [--mode symlink|move|copy] [--no-dir] [--yes] CWD...
 #                                       bring Claude Code history for CWD into an existing profile
+#   worktrees <slug>|main|--all [list] [--older-than DAYS] [--include-uncommitted] [--no-size] [--plain]
+#                                       git worktrees of the Code tab: state, idle days, size, and which clean would remove (read-only)
+#   worktrees <slug>|main|--all clean [--path PATH]... [--older-than DAYS] [--include-uncommitted] [--keep-branches]
+#             [--keep-branch PATH]... [--delete-branch PATH]... [--delete-unsaved-branches] [--dry-run] [--yes] [--plain]
+#                                       remove idle worktrees with git (default 30 days) or only the given paths (age ignored); a branch
+#                                       whose every commit is on another branch, tag or remote is deleted too, others are kept unless
+#                                       --delete-branch PATH or --delete-unsaved-branches; sessions stay; the app must be quit
+#   caches <slug>|main|--all [list] [--plain]
+#                                       rebuildable cache folders of the app's data dir (web, per-pane, old Claude Code versions) and the
+#                                       Cowork VM disk with sizes (read-only)
+#   caches <slug>|main|--all clean [--item [ID:]REL]... [--dry-run] [--yes] [--plain]
+#                                       remove cache folders (all, or only the given items; the Cowork VM disk only when named with --item);
+#                                       the app rebuilds them on next launch; the app must be quit
+#   storage <slug>|main|--all [--plain]  everything a profile stores: every entry of its data dir and config dir and its Code worktrees,
+#                                       with sizes and the command that cleans each (read-only)
+#   history <slug>|main|--all [list] [--plain]
+#                                       Claude Code session history per project in the config dir: cwd, sessions, size, last use (read-only)
+#   history <slug>|main|--all clean --project [ID:]NAME... [--dry-run] [--yes] [--plain]
+#                                       delete the history of the given projects for good; the app must be quit
 #   setup [--identity NAME]             run once in Terminal: signing identity + auto-rebuild agent
 #   status [--plain]                    CLI install, signing identity, agent, source app, claude:// handler
 #   install-cli [--from DIR] [--prefix DIR] [--share-dir DIR] [--bin-dir DIR]
@@ -65,6 +84,8 @@ setopt extended_glob
 set -euo pipefail
 zmodload -F zsh/stat b:zstat
 zmodload zsh/datetime
+typeset -g PROGRESS_FILE="" PROGRESS_PID=""
+typeset -gi DU_JOBS=6
 
 SELF=${0:A}
 ROOT=${SELF:h:h}
@@ -121,6 +142,10 @@ ASAR_FUSE_WIRE_VERSION=1
 ASAR_FUSE_COUNT=9
 ASAR_DIGEST_SENTINEL=AGbevlPCksUGKNL8TSn7wGmJEuJsXb2A
 ASAR_DIGEST_VERSION=1
+WORKTREES_DEFAULT_DAYS=30
+WORKTREES_SECONDS_PER_DAY=86400
+CACHES_NAMES=( Cache "Code Cache" GPUCache DawnGraphiteCache DawnWebGPUCache GraphiteDawnCache GPUPersistentCache ShaderCache GrShaderCache )
+CACHES_VERSION_FOLDERS=( claude-code claude-code-vm )
 
 PLAIN=0
 YES=0
@@ -178,6 +203,7 @@ cleanup() {
   for p in "${STUB_DIRS[@]}"; do
     [[ -n $p ]] && remove_stub "$p"
   done
+  progress_stop
   release_lock
   if [[ -n $TMP && -d $TMP ]]; then
     rm -rf -- "$TMP"
@@ -417,11 +443,11 @@ re_escape() {
 }
 
 app_main_pids() {
-  pgrep -f "^$(re_escape "$1")/Contents/MacOS/" 2>/dev/null || true
+  pgrep -a -f "^$(re_escape "$1")/Contents/MacOS/" 2>/dev/null || true
 }
 
 app_all_pids() {
-  pgrep -f "^$(re_escape "$1")/Contents/" 2>/dev/null || true
+  pgrep -a -f "^$(re_escape "$1")/Contents/" 2>/dev/null || true
 }
 
 is_running() {
@@ -4001,7 +4027,7 @@ bare_launch_pid() {
   local exe pattern pid bare_pid=""
   exe=$(plist_get "$PROFILE_APP" CFBundleExecutable)
   pattern="^$(re_escape "$PROFILE_APP")/Contents/MacOS/$(re_escape "${exe:-Claude}")( |\$)"
-  for pid in ${(f)"$(pgrep -f "$pattern" 2>/dev/null || true)"}; do
+  for pid in ${(f)"$(pgrep -a -f "$pattern" 2>/dev/null || true)"}; do
     [[ -n $pid ]] || continue
     if [[ $(ps -ww -o command= -p "$pid" 2>/dev/null || true) != *"--user-data-dir=$PROFILE_DATA_DIR"* ]]; then
       bare_pid=$pid
@@ -4475,6 +4501,1731 @@ cmd_projects() {
     add) projects_add "$@" ;;
     *) usage_error "projects <slug> list [--plain] | projects <slug> add [--mode symlink|move|copy] [--no-dir] [--yes] CWD..." ;;
   esac
+}
+
+worktrees_human_kb() {
+  local kb=$1
+  if (( kb >= 1048576 )); then
+    printf '%.1f GB' $(( kb / 1048576.0 ))
+  elif (( kb >= 1024 )); then
+    printf '%.0f MB' $(( kb / 1024.0 ))
+  else
+    printf '%d KB' $kb
+  fi
+}
+
+progress_start() {
+  progress_stop
+  (( PLAIN )) && return 0
+  [[ -t 2 ]] || return 0
+  PROGRESS_FILE=$(mktemp -t claude-profiles-progress 2>/dev/null) || { PROGRESS_FILE=""; return 0; }
+  print -r -- "$1" >| "$PROGRESS_FILE"
+  local parent=$$ started=$EPOCHSECONDS file=$PROGRESS_FILE
+  (
+    local -a frames=( '|' '/' '-' '\' ) size
+    local -i tick=0 cols room
+    local label prefix
+    while [[ -f $file ]] && kill -0 $parent 2>/dev/null; do
+      label=$(<"$file" 2>/dev/null)
+      size=( $(stty size </dev/tty 2>/dev/null) )
+      cols=${size[2]:-80}
+      (( cols > 20 )) || cols=80
+      prefix="$frames[tick % 4 + 1] $(( EPOCHSECONDS - started ))s  "
+      room=$(( cols - ${#prefix} - 1 ))
+      (( ${#label} > room )) && label="${label[1,room-1]}…"
+      printf '\r\033[K%s%s' "$prefix" "$label" >&2
+      tick+=1
+      sleep 0.25
+    done
+  ) &!
+  PROGRESS_PID=$!
+}
+
+du_map() {
+  local label=$1 line kb p
+  shift
+  local -i measured=0 total=$#
+  typeset -gA DU_KB
+  DU_KB=()
+  (( total )) || return 0
+  [[ -n $label ]] && progress_note "$label · 0/$total done"
+  print -rN -- "$@" | xargs -0 -n1 -P$DU_JOBS du -sk -- 2>/dev/null | while IFS= read -r line; do
+    kb=${line%%$'\t'*}
+    p=${line#*$'\t'}
+    [[ $kb == <-> ]] && DU_KB[$p]=$kb
+    measured+=1
+    [[ -n $label && -n ${PROGRESS_FILE:-} ]] && progress_note "$label · $measured/$total done · $(progress_place "$p")"
+  done || true
+  return 0
+}
+
+progress_place() {
+  local p=$1
+  if [[ $p == */.claude/worktrees/* ]]; then
+    print -r -- "${${p%%/.claude/worktrees/*}:t}/${p:t}"
+  else
+    tilde "$p"
+  fi
+}
+
+progress_note() {
+  [[ -n ${PROGRESS_FILE:-} && -f $PROGRESS_FILE ]] && print -r -- "$1" >| "$PROGRESS_FILE"
+  return 0
+}
+
+progress_stop() {
+  [[ -n ${PROGRESS_FILE:-} ]] || return 0
+  [[ -n ${PROGRESS_PID:-} ]] && kill $PROGRESS_PID 2>/dev/null
+  rm -f -- "$PROGRESS_FILE"
+  PROGRESS_FILE="" PROGRESS_PID=""
+  printf '\r\033[K' >&2
+}
+
+worktrees_targets() {
+  local target=$1 all=$2 s
+  local SLUG ${PROFILE_KEYS[@]}
+  local -a PROFILE_DIRS reply
+  typeset -ga WT_IDS WT_NAMES WT_DIRS WT_APPS
+  WT_IDS=() WT_NAMES=() WT_DIRS=() WT_APPS=()
+  if (( all )) || [[ $target == main || $target == default ]]; then
+    WT_IDS+=( main ) WT_NAMES+=( Claude ) WT_DIRS+=( "$MAIN_DATA_DIR" ) WT_APPS+=( "$SOURCE_APP" )
+  fi
+  if (( all )); then
+    all_slugs
+    for s in $reply; do
+      profile_load "$s"
+      (( PROFILE_DESKTOP )) || continue
+      WT_IDS+=( "$SLUG" ) WT_NAMES+=( "$PROFILE_NAME" ) WT_DIRS+=( "$PROFILE_DATA_DIR" ) WT_APPS+=( "$PROFILE_APP" )
+    done
+  elif [[ $target != main && $target != default ]]; then
+    profile_load "$target"
+    (( PROFILE_DESKTOP )) || die "profile $SLUG has no desktop app"
+    WT_IDS+=( "$SLUG" ) WT_NAMES+=( "$PROFILE_NAME" ) WT_DIRS+=( "$PROFILE_DATA_DIR" ) WT_APPS+=( "$PROFILE_APP" )
+  fi
+}
+
+worktrees_registered_trees() {
+  local repo=$1 out entry listed="" any=""
+  local -i first=1
+  WT_MAIN=""
+  WT_REGISTERED=$'\n'
+  WT_DETACHED=$'\n'
+  WT_BRANCH_PAIRS=""
+  [[ $repo == /* && -d $repo ]] || return 0
+  out=$(git -C "$repo" worktree list --porcelain 2>/dev/null || true)
+  for entry in "${(@f)out}"; do
+    if [[ $entry == "worktree "* ]]; then
+      any=${${entry#worktree }:A}
+      listed=$any
+      if (( first )); then
+        WT_MAIN=$listed
+        listed=""
+        first=0
+      else
+        WT_REGISTERED+="$listed"$'\n'
+      fi
+    elif [[ $entry == detached && -n $listed ]]; then
+      WT_DETACHED+="$listed"$'\n'
+    elif [[ $entry == "branch refs/heads/"* && -n $any ]]; then
+      WT_BRANCH_PAIRS+="$any"$'\t'"${entry#branch refs/heads/}"$'\n'
+    fi
+  done
+}
+
+worktrees_branch_of() {
+  local pairs=$1 real=$2 pair
+  WT_BRANCH=-
+  for pair in "${(@f)pairs}"; do
+    if [[ $pair == "$real"$'\t'* ]]; then
+      WT_BRANCH=${pair#*$'\t'}
+      return 0
+    fi
+  done
+  return 0
+}
+
+worktrees_branch_state() {
+  local repo=$1 b=$2 gone n
+  local -a excludes
+  shift 2
+  for gone in "$@"; do
+    excludes+=( "--exclude=$gone" )
+  done
+  if [[ $repo != /* || ! -d $repo ]]; then
+    WT_BSTATE=-
+  elif [[ -z $b || $b == - ]]; then
+    WT_BSTATE=none
+  elif ! n=$(git -C "$repo" rev-list --count "refs/heads/$b" --not "--exclude=$b" "${excludes[@]}" --branches --tags --remotes 2>/dev/null) || [[ $n != <-> ]]; then
+    WT_BSTATE=-
+  elif (( n == 0 )); then
+    WT_BSTATE=saved
+  else
+    WT_BSTATE=unsaved:$n
+  fi
+}
+
+worktrees_branch_checked_out() {
+  local repo=$1 b=$2 own=$3 out entry listed=""
+  out=$(git -C "$repo" worktree list --porcelain 2>/dev/null) || return 0
+  for entry in "${(@f)out}"; do
+    if [[ $entry == "worktree "* ]]; then
+      listed=${${entry#worktree }:A}
+    elif [[ $entry == "branch refs/heads/$b" && $listed != "$own" ]]; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+worktrees_registry_branch_free() {
+  local repo=$1 b=$2
+  [[ $repo == /* && -d $repo && -n $b && $b != - ]] || return 1
+  git -C "$repo" check-ref-format --branch "$b" >/dev/null 2>&1 || return 1
+  git -C "$repo" show-ref --verify --quiet "refs/heads/$b" || return 1
+  ! worktrees_branch_checked_out "$repo" "$b" ""
+}
+
+worktrees_head_unreachable() {
+  [[ -z $(git -C "$1" for-each-ref --contains HEAD --count=1 --format='%(refname)' refs/heads refs/tags refs/remotes 2>/dev/null) ]]
+}
+
+worktrees_collect() {
+  local id=$1 data_dir=$2 min_days=$3 include=$4 sizes=$5
+  local lines line name wpath repo branch state dirty size reason eligible title real status_out last_label main registered detached
+  local WT_BRANCH WT_BSTATE
+  local -i leased matched archived kept starred last_ms idle_days now_s=$EPOCHSECONDS
+  local -a fields repos_seen mains_seen trees_seen detached_seen branches_seen reals_seen pending_reals
+  local -a pending_rows
+  local -i idx
+  local current=${PWD:A}
+  WT_ROWS=()
+  WT_REGISTRY=0
+  [[ -f $data_dir/git-worktrees.json ]] || return 0
+  if ! lines=$(jxa worktrees.js "$data_dir"); then
+    warn "could not read the worktree registry in $(tilde "$data_dir")"
+    return 0
+  fi
+  WT_REGISTRY=1
+  local -i row_index=0 row_total=${#${(@f)lines}}
+  for line in "${(@f)lines}"; do
+    [[ -n $line ]] || continue
+    fields=( "${(@ps:\t:)line}" )
+    name=$fields[1] wpath=$fields[2] repo=$fields[3] branch=$fields[4]
+    leased=$fields[5] matched=$fields[6] archived=$fields[7] kept=$fields[8] starred=$fields[9] last_ms=$fields[10]
+    title=$fields[11]
+    real=${wpath:A}
+    row_index+=1
+    progress_note "${WT_PROGRESS_LABEL:-$id} · checking worktree $row_index/$row_total · $(progress_place "$wpath")"
+
+    if [[ ! -d $wpath ]]; then
+      state=missing
+    elif (( ! leased )); then
+      state=pool
+    elif (( ! matched )); then
+      state=orphan
+    elif (( archived && kept )); then
+      state=kept
+    elif (( archived )); then
+      state=archived
+    else
+      state=active
+    fi
+
+    if (( last_ms > 0 )); then
+      idle_days=$(( (now_s - last_ms / 1000) / WORKTREES_SECONDS_PER_DAY ))
+      (( idle_days >= 0 )) || idle_days=0
+      last_label=$(iso_time $(( last_ms / 1000 )))
+    else
+      idle_days=0
+      last_label=-
+    fi
+
+    idx=${repos_seen[(Ie)$repo]}
+    if (( idx == 0 )); then
+      worktrees_registered_trees "$repo"
+      repos_seen+=( "$repo" )
+      mains_seen+=( "$WT_MAIN" )
+      trees_seen+=( "$WT_REGISTERED" )
+      detached_seen+=( "$WT_DETACHED" )
+      branches_seen+=( "$WT_BRANCH_PAIRS" )
+      idx=${#repos_seen}
+    fi
+    main=$mains_seen[idx] registered=$trees_seen[idx] detached=$detached_seen[idx]
+    worktrees_branch_of "$branches_seen[idx]" "$real"
+    [[ $WT_BRANCH == - ]] && worktrees_registry_branch_free "$repo" "$branch" && WT_BRANCH=$branch
+    worktrees_branch_state "$repo" "$WT_BRANCH"
+
+    dirty=-
+    size=-
+    if [[ $wpath == /* && -d $wpath ]]; then
+      if [[ $registered == *$'\n'"$real"$'\n'* ]]; then
+        if status_out=$(git -C "$real" status --porcelain --untracked-files=normal 2>/dev/null); then
+          [[ -z $status_out ]] && dirty=0 || dirty=1
+        fi
+      fi
+    fi
+
+    reason=-
+    if [[ ! -d $wpath ]]; then
+      reason=missing
+    elif [[ $wpath != /* || ( $repo != - && $repo != /* ) || ( -n $main && ${repo:A} != "$main" ) ]]; then
+      reason=bad_path
+    elif [[ $repo == - || ! -d $repo ]]; then
+      reason=no_repo
+    elif [[ $registered != *$'\n'"$real"$'\n'* ]]; then
+      reason=not_a_worktree
+    elif [[ $real != "$main"/.claude/worktrees/* ]]; then
+      reason=outside
+    elif (( ${reals_seen[(Ie)$real]} )); then
+      reason=duplicate
+    elif [[ $current == "$real" || $current == "$real"/* ]]; then
+      reason=current
+    elif [[ -e $real/.worktree-keep ]]; then
+      reason=keep_marker
+    elif (( starred )); then
+      reason=pinned
+    elif [[ $detached == *$'\n'"$real"$'\n'* ]] && worktrees_head_unreachable "$real"; then
+      reason=detached
+    elif (( last_ms <= 0 )); then
+      reason=no_timestamp
+    elif (( ! include )) && [[ $state == kept || $dirty != 0 ]]; then
+      reason=dirty
+    elif (( idle_days < min_days )); then
+      reason=recent
+    fi
+    [[ $wpath == /* ]] && reals_seen+=( "$real" )
+    [[ $reason == - ]] && eligible=1 || eligible=0
+    if [[ $wpath == /* && -d $wpath ]] && (( sizes == 1 || ( sizes == 2 && eligible ) )) && { (( ! ${#WT_SELECT} )) || worktrees_match_paths "$wpath"; }; then
+      pending_rows+=( $(( ${#WT_ROWS} + 1 )) )
+      pending_reals+=( "$real" )
+    fi
+
+    WT_ROWS+=( "$id"$'\t'"$name"$'\t'"$wpath"$'\t'"$repo"$'\t'"$branch"$'\t'"$state"$'\t'"$last_label"$'\t'"$idle_days"$'\t'"$dirty"$'\t'"$size"$'\t'"$eligible"$'\t'"$reason"$'\t'"$title"$'\t'"$WT_BSTATE"$'\t'"$WT_BRANCH" )
+  done
+  worktrees_fill_sizes
+}
+
+worktrees_fill_sizes() {
+  local -i k
+  local kb
+  local -a f
+  (( ${#pending_rows} )) || return 0
+  du_map "${WT_PROGRESS_LABEL:-$id} · measuring worktrees" "${pending_reals[@]}"
+  for (( k = 1; k <= ${#pending_rows}; k++ )); do
+    kb=${DU_KB[$pending_reals[k]]:-}
+    [[ $kb == <-> ]] || continue
+    f=( "${(@ps:\t:)WT_ROWS[pending_rows[k]]}" )
+    f[10]=$kb
+    WT_ROWS[pending_rows[k]]=${(pj:\t:)f}
+  done
+}
+
+worktrees_print_list() {
+  local id=$1 name=$2 data_dir=$3 app=$4 min_days=$5 include=$6 sizes=$7
+  local running=0 row f_name state_label size_label status_label branch_label
+  local -a f
+  is_running "$app" && running=1
+  local WT_PROGRESS_LABEL=$name
+  progress_start "$name · reading the worktree registry"
+  worktrees_collect "$id" "$data_dir" "$min_days" "$include" "$sizes"
+  progress_stop
+  local -a WT_ROWS_BY_SIZE
+  rows_by_size_desc 10 "${WT_ROWS[@]}"
+  WT_ROWS_BY_SIZE=( "${reply[@]}" )
+  if (( PLAIN )); then
+    print -r -- "profile"$'\t'"$id"$'\t'"$name"$'\t'"$data_dir"$'\t'"$running"$'\t'"$WT_REGISTRY"
+    for row in $WT_ROWS_BY_SIZE; do
+      print -r -- "worktree"$'\t'"$row"
+    done
+  else
+    say "${C_BOLD}$name${C_RESET} ${C_DIM}($id)  $(tilde "$data_dir")${C_RESET}"
+    (( running )) && say "  ${C_YELLOW}the app is running: quit it before clean${C_RESET}"
+    if (( ! WT_REGISTRY )); then
+      say "  ${C_DIM}no git-worktrees.json: the Code tab has not created worktrees here${C_RESET}"
+    elif (( ! ${#WT_ROWS} )); then
+      say "  ${C_DIM}no worktrees recorded${C_RESET}"
+    fi
+    local -i path_width=8 branch_width=6
+    for row in $WT_ROWS_BY_SIZE; do
+      f=( "${(@ps:\t:)row}" )
+      f_name=$(tilde "$f[3]")
+      (( ${#f_name} > path_width )) && path_width=${#f_name}
+      (( ${#f[15]} > branch_width )) && branch_width=${#f[15]}
+    done
+    if (( ${#WT_ROWS} )); then
+      say "  ${C_DIM}${(l:8:)${:-SIZE}}  ${(l:4:)${:-IDLE}}  ${(r:7:)${:-KIND}}  ${(r:5:)${:-FILES}}  ${(r:22:)${:-STATUS}}  ${(r:$path_width:)${:-WORKTREE}}  ${(r:$branch_width:)${:-BRANCH}}  ${(r:10:)${:-COMMITS}}  SESSION${C_RESET}"
+    fi
+    for row in $WT_ROWS_BY_SIZE; do
+      f=( "${(@ps:\t:)row}" )
+      f_name=$(tilde "$f[3]")
+      size_label=-
+      [[ $f[10] == - ]] || size_label=$(worktrees_human_kb $f[10])
+      case $f[9] in
+        0) state_label=clean ;;
+        1) state_label=dirty ;;
+        *) state_label=- ;;
+      esac
+      if [[ $f[11] == 1 ]]; then
+        status_label="${C_GREEN}${(r:22:)${:-can be removed}}${C_RESET}"
+      else
+        status_label="${C_DIM}${(r:22:)${:-skip: $f[12]}}${C_RESET}"
+      fi
+      case $f[14] in
+        saved) branch_label="${C_DIM}${(r:10:)${:-saved}}${C_RESET}" ;;
+        unsaved:*) branch_label="${C_YELLOW}${(r:10:)${:-${f[14]#unsaved:} unsaved}}${C_RESET}" ;;
+        *) branch_label="${C_DIM}${(r:10:)${:--}}${C_RESET}" ;;
+      esac
+      say "  ${(l:8:)size_label}  ${(l:4:)${:-$f[8]d}}  ${(r:7:)f[6]}  ${(r:5:)state_label}  $status_label  ${(r:$path_width:)f_name}  ${(r:$branch_width:)f[15]}  $branch_label  ${C_DIM}$f[13]${C_RESET}"
+    done
+    worktrees_print_breakdown "$min_days" "$sizes"
+  fi
+  local -i count=0 kb=0 sized=0
+  for row in $WT_ROWS_BY_SIZE; do
+    f=( "${(@ps:\t:)row}" )
+    [[ $f[11] == 1 ]] || continue
+    count+=1
+    if [[ $f[10] == <-> ]]; then
+      kb+=$f[10]
+      sized=1
+    fi
+  done
+  WT_TOTAL_COUNT+=$count
+  WT_TOTAL_KB+=$kb
+  (( sized )) && WT_TOTAL_SIZED=1
+  return 0
+}
+
+worktrees_reason_phrase() {
+  local reason=$1 days=$2
+  case $reason in
+    -) REPLY="can be removed" ;;
+    recent) REPLY="newer than $days days (lower --older-than)" ;;
+    dirty) REPLY="with uncommitted changes (--include-uncommitted)" ;;
+    current) REPLY="in use by this shell" ;;
+    pinned) REPLY="starred in Claude" ;;
+    keep_marker) REPLY="marked with .worktree-keep" ;;
+    detached) REPLY="on a commit no branch holds" ;;
+    *) REPLY="skipped: $reason" ;;
+  esac
+}
+
+rows_by_size_desc() {
+  local -i col=$1
+  shift
+  local row kb
+  local -a f keyed
+  for row in "$@"; do
+    f=( "${(@ps:\t:)row}" )
+    kb=$f[col]
+    [[ $kb == <-> ]] || kb=0
+    keyed+=( "${(l:15::0:)kb}"$'\t'"$row" )
+  done
+  reply=( "${(@)${(@O)keyed}#*$'\t'}" )
+}
+
+worktrees_print_breakdown() {
+  local days=$1 with_sizes=$2 row reason part
+  local -a f order
+  local -A count_by kb_by
+  local -i total_kb=0
+  for row in $WT_ROWS; do
+    f=( "${(@ps:\t:)row}" )
+    reason=$f[12]
+    [[ $reason == missing ]] && continue
+    (( ${order[(Ie)$reason]} )) || order+=( "$reason" )
+    count_by[$reason]=$(( ${count_by[$reason]:-0} + 1 ))
+    if [[ $f[10] == <-> ]]; then
+      kb_by[$reason]=$(( ${kb_by[$reason]:-0} + f[10] ))
+      total_kb+=$f[10]
+    fi
+  done
+  (( ${#order} )) || return 0
+  if (( with_sizes )); then
+    local -a weighted
+    for reason in $order; do
+      weighted+=( "$reason"$'\t'"${kb_by[$reason]:-0}" )
+    done
+    rows_by_size_desc 2 "${weighted[@]}"
+    order=( "${(@)reply%%$'\t'*}" )
+  fi
+  local -a parts
+  for reason in $order; do
+    worktrees_reason_phrase "$reason" "$days"
+    if (( with_sizes )); then
+      parts+=( "$(worktrees_human_kb ${kb_by[$reason]:-0}) $REPLY (${count_by[$reason]})" )
+    else
+      parts+=( "${count_by[$reason]} $REPLY" )
+    fi
+  done
+  if (( with_sizes )); then
+    say "  ${C_BOLD}$(worktrees_human_kb $total_kb) in ${#WT_ROWS} worktree(s)${C_RESET}"
+  fi
+  for part in $parts; do
+    say "    ${C_DIM}·${C_RESET} $part"
+  done
+}
+
+worktrees_list() {
+  local target=$1 min_days=$2 include=$3 sizes=$4 i
+  local -i WT_TOTAL_COUNT=0 WT_TOTAL_KB=0 WT_TOTAL_SIZED=0
+  for (( i = 1; i <= ${#WT_IDS}; i++ )); do
+    worktrees_print_list "$WT_IDS[i]" "$WT_NAMES[i]" "$WT_DIRS[i]" "$WT_APPS[i]" "$min_days" "$include" "$sizes"
+  done
+  (( PLAIN )) && return 0
+  if (( WT_TOTAL_COUNT )); then
+    local freed=""
+    (( WT_TOTAL_SIZED )) && freed=" ($(worktrees_human_kb $WT_TOTAL_KB))"
+    local flag=""
+    (( include )) && flag=" --include-uncommitted"
+    say "${C_BOLD}$WT_TOTAL_COUNT can be removed$freed${C_RESET} with: claude-profiles worktrees $target clean --older-than $min_days$flag"
+  else
+    say "${C_DIM}Nothing to remove at --older-than $min_days.${C_RESET}"
+  fi
+}
+
+worktrees_report_blocked() {
+  local id=$1 name=$2
+  if (( PLAIN )); then
+    print -r -- "blocked"$'\t'"$id"$'\t'"running"
+  else
+    say "${C_YELLOW}$name is running${C_RESET}: quit it, then run clean again."
+  fi
+}
+
+worktrees_remove_one() {
+  local repo=$1 wpath=$2 include=$3 err
+  local -a force
+  (( include )) && force=( --force )
+  if err=$(git -C "$repo" worktree remove "${force[@]}" -- "$wpath" 2>&1); then
+    return 0
+  fi
+  err=${err//[[:cntrl:]]/ }
+  WT_ERROR=${err:-git worktree remove failed}
+  return 1
+}
+
+worktrees_match_paths() {
+  local wpath=$1 given
+  local real=${wpath:A}
+  WT_MATCHED=()
+  for given in $WT_SELECT; do
+    if [[ $given == "$wpath" || $given == "$real" || ${given:A} == "$real" ]]; then
+      WT_MATCHED+=( "$given" )
+    fi
+  done
+  (( ${#WT_MATCHED} ))
+}
+
+worktrees_report_skipped() {
+  local id=$1 spath=$2 reason=$3
+  if (( PLAIN )); then
+    print -r -- "skipped"$'\t'"$id"$'\t'"$spath"$'\t'"$reason"
+  elif [[ $reason == not_found ]]; then
+    say "  ${C_DIM}skipped $(tilde "$spath"): not in any worktree registry${C_RESET}"
+  else
+    say "  ${C_DIM}skipped $(tilde "$spath"): $reason${C_RESET}"
+  fi
+}
+
+worktrees_branch_report() {
+  local tag=$1 id=$2 spath=$3 b=$4 reason=$5 n=$6
+  local t=$'\t'
+  case $tag in
+    branch_deleted|would_delete_branch)
+      WT_BRANCHES_DELETED+=1
+      if (( PLAIN )); then
+        print -r -- "${tag}${t}$id${t}$spath${t}$b${t}$n"
+      elif [[ $tag == branch_deleted ]]; then
+        WT_BRANCH_NOTE="$b ${C_GREEN}deleted${C_RESET}"
+      else
+        WT_BRANCH_NOTE="$b ${C_GREEN}would be deleted${C_RESET}"
+      fi
+      ;;
+    *)
+      WT_BRANCHES_KEPT+=1
+      if (( PLAIN )); then
+        print -r -- "${tag}${t}$id${t}$spath${t}$b${t}$reason${t}$n"
+      else
+        case $reason in
+          unsaved) WT_BRANCH_NOTE="$b ${C_YELLOW}kept: $n commit(s) found nowhere else${C_RESET}" ;;
+          protected) WT_BRANCH_NOTE="$b ${C_DIM}kept: default branch${C_RESET}" ;;
+          checked_out) WT_BRANCH_NOTE="$b ${C_DIM}kept: checked out in another worktree${C_RESET}" ;;
+          kept_by_flag) WT_BRANCH_NOTE="$b ${C_DIM}kept${C_RESET}" ;;
+          failed:*) WT_BRANCH_NOTE="$b ${C_RED}kept: ${reason#failed:}${C_RESET}" ;;
+          *) WT_BRANCH_NOTE="$b ${C_DIM}kept: $reason${C_RESET}" ;;
+        esac
+      fi
+      ;;
+  esac
+}
+
+worktrees_path_in() {
+  local spath=$1 given
+  local real=${spath:A}
+  shift
+  for given in "$@"; do
+    [[ $given == "$spath" || $given == "$real" || ${given:A} == "$real" ]] && return 0
+  done
+  return 1
+}
+
+worktrees_wants_branch_deleted() {
+  local spath=$1
+  (( WT_DELETE_UNSAVED )) && return 0
+  worktrees_path_in "$spath" "${WT_DELETE_BRANCH[@]}"
+}
+
+worktrees_branch_protected() {
+  local repo=$1 b=$2 default
+  [[ $b == (main|master|develop|trunk) ]] && return 0
+  default=$(git -C "$repo" symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null || true)
+  default=${default#origin/}
+  [[ -n $default && $b == "$default" ]]
+}
+
+worktrees_gone_of() {
+  local repo=$1 entry
+  WT_GONE=()
+  for entry in $WT_GONE_BRANCHES; do
+    [[ $entry == "$repo"$'\t'* ]] && WT_GONE+=( "${entry#*$'\t'}" )
+  done
+  return 0
+}
+
+worktrees_branch_after() {
+  local id=$1 spath=$2 repo=$3 b=$4 cached=$5 dry=$6
+  local own=${spath:A} n=0 err keep_tag=branch_kept delete_tag=branch_deleted
+  local WT_BSTATE
+  local -a WT_GONE
+  [[ $b != - && $cached != none && $cached != - ]] || return 0
+  git -C "$repo" show-ref --verify --quiet "refs/heads/$b" || return 0
+  worktrees_gone_of "$repo"
+  (( ${WT_GONE[(Ie)$b]} )) && return 0
+  [[ $cached == unsaved:* ]] && n=${cached#unsaved:}
+  if (( dry )); then
+    keep_tag=would_keep_branch
+    delete_tag=would_delete_branch
+  fi
+  if (( WT_KEEP_BRANCHES )) || worktrees_path_in "$spath" "${WT_KEEP_BRANCH[@]}"; then
+    worktrees_branch_report "$keep_tag" "$id" "$spath" "$b" kept_by_flag "$n"
+    return 0
+  fi
+  if worktrees_branch_protected "$repo" "$b"; then
+    worktrees_branch_report "$keep_tag" "$id" "$spath" "$b" protected "$n"
+    return 0
+  fi
+  if worktrees_branch_checked_out "$repo" "$b" "$own"; then
+    worktrees_branch_report "$keep_tag" "$id" "$spath" "$b" checked_out "$n"
+    return 0
+  fi
+  worktrees_gone_of "$repo"
+  worktrees_branch_state "$repo" "$b" "${WT_GONE[@]}"
+  case $WT_BSTATE in
+    saved) n=0 ;;
+    unsaved:*) n=${WT_BSTATE#unsaved:} ;;
+    *)
+      worktrees_branch_report "$keep_tag" "$id" "$spath" "$b" "failed:could not read the branch" "$n"
+      return 0
+      ;;
+  esac
+  if (( n > 0 )) && ! worktrees_wants_branch_deleted "$spath"; then
+    if (( dry || YES || PLAIN )) || [[ ! -t 0 ]]; then
+      worktrees_branch_report "$keep_tag" "$id" "$spath" "$b" unsaved "$n"
+      return 0
+    fi
+    progress_stop
+    ask "Branch $b of $(tilde "$spath") has $n commit(s) found nowhere else. Delete it too? [y/N] " n
+    if [[ $REPLY != [yY]* ]]; then
+      worktrees_branch_report "$keep_tag" "$id" "$spath" "$b" unsaved "$n"
+      return 0
+    fi
+  fi
+  if (( dry )); then
+    WT_GONE_BRANCHES+=( "$repo"$'\t'"$b" )
+    worktrees_branch_report "$delete_tag" "$id" "$spath" "$b" - "$n"
+    return 0
+  fi
+  if err=$(git -C "$repo" branch -D -- "$b" 2>&1); then
+    WT_GONE_BRANCHES+=( "$repo"$'\t'"$b" )
+    worktrees_branch_report "$delete_tag" "$id" "$spath" "$b" - "$n"
+  else
+    err=${err//[[:cntrl:]]/ }
+    worktrees_branch_report "$keep_tag" "$id" "$spath" "$b" "failed:${err:-git branch -D failed}" "$n"
+  fi
+}
+
+worktrees_clean() {
+  local min_days=$1 include=$2 dry=$3 i row p
+  local -i removed=0 freed=0 failed=0 blocked=0 count kb selecting=${#WT_SELECT} collect_days=$1
+  local -i WT_BRANCHES_DELETED=0 WT_BRANCHES_KEPT=0 path_width=8
+  local WT_BRANCH_NOTE shown_path size_label WT_PROGRESS_LABEL=""
+  local -a f eligible found_paths candidate_paths skipped_pairs WT_GONE_BRANCHES not_removed_rows
+  local -a WT_MATCHED
+  local t=$'\t'
+  local WT_ERROR=""
+  (( selecting )) && collect_days=0
+  for (( i = 1; i <= ${#WT_IDS}; i++ )); do
+    WT_PROGRESS_LABEL=$WT_NAMES[i]
+    progress_start "$WT_NAMES[i] · reading the worktree registry"
+    worktrees_collect "$WT_IDS[i]" "$WT_DIRS[i]" "$collect_days" "$include" 2
+    progress_stop
+    eligible=() candidate_paths=() skipped_pairs=()
+    count=0 kb=0
+    for row in $WT_ROWS; do
+      f=( "${(@ps:\t:)row}" )
+      if (( selecting )); then
+        worktrees_match_paths "$f[3]" || continue
+        found_paths+=( "${WT_MATCHED[@]}" )
+      fi
+      if [[ $f[11] == 1 ]]; then
+        eligible+=( "$row" )
+        count+=1
+        [[ $f[10] == <-> ]] && kb+=$f[10]
+        (( selecting )) && candidate_paths+=( "${WT_MATCHED[@]}" )
+      elif (( ! selecting )); then
+        not_removed_rows+=( "$row" )
+      elif (( selecting )); then
+        for p in $WT_MATCHED; do
+          skipped_pairs+=( "$p"$'\t'"$f[12]" )
+        done
+      fi
+    done
+    for row in $skipped_pairs; do
+      f=( "${(@ps:\t:)row}" )
+      (( ${candidate_paths[(Ie)$f[1]]} )) || worktrees_report_skipped "$WT_IDS[i]" "$f[1]" "$f[2]"
+    done
+    if (( count && ! dry )) && is_running "$WT_APPS[i]"; then
+      blocked+=1
+      worktrees_report_blocked "$WT_IDS[i]" "$WT_NAMES[i]"
+      continue
+    fi
+    if (( ! count )); then
+      if (( ! PLAIN )); then
+        if (( selecting )); then
+          say "$WT_NAMES[i]: ${C_DIM}nothing to remove among the selected paths${C_RESET}"
+        else
+          say "$WT_NAMES[i]: ${C_DIM}nothing to remove at --older-than $min_days${C_RESET}"
+        fi
+      fi
+      continue
+    fi
+    if (( ! dry )); then
+      local branch_note="their branches stay"
+      (( WT_KEEP_BRANCHES )) || branch_note="their branches are deleted when every commit is also on another branch or remote (never the default branch, main, master, develop or trunk)"
+      confirm "Remove $count worktree(s) of $WT_NAMES[i] ($(worktrees_human_kb $kb))? Ignored files such as .env and node_modules go with them; $branch_note; sessions stay." || { (( PLAIN )) || say "Cancelled."; continue; }
+    fi
+    if (( ! dry )) && is_running "$WT_APPS[i]"; then
+      blocked+=1
+      worktrees_report_blocked "$WT_IDS[i]" "$WT_NAMES[i]"
+      continue
+    fi
+    if (( ! PLAIN )); then
+      path_width=8
+      for row in $eligible; do
+        f=( "${(@ps:\t:)row}" )
+        shown_path=$(tilde "$f[3]")
+        (( ${#shown_path} > path_width )) && path_width=${#shown_path}
+      done
+      say "${C_BOLD}$WT_NAMES[i]${C_RESET} ${C_DIM}($WT_IDS[i])${C_RESET}"
+      say "  ${C_DIM}${(l:8:)${:-SIZE}}  ${(r:12:)${:-RESULT}}  ${(r:$path_width:)${:-WORKTREE}}  BRANCH${C_RESET}"
+    fi
+    local -a shown_rows
+    local -i removing=0
+    shown_rows=()
+    for row in $eligible; do
+      f=( "${(@ps:\t:)row}" )
+      removing+=1
+      (( dry )) || progress_start "$WT_NAMES[i] · removing worktree $removing/${#eligible} · $(progress_place "$f[3]")"
+      WT_BRANCH_NOTE="${C_DIM}-${C_RESET}"
+      size_label=-
+      [[ $f[10] == <-> ]] && size_label=$(worktrees_human_kb $f[10])
+      shown_path=$(tilde "$f[3]")
+      if (( dry )); then
+        removed+=1
+        [[ $f[10] == <-> ]] && freed+=$f[10]
+        (( PLAIN )) && print -r -- "would_remove${t}$WT_IDS[i]${t}$f[3]${t}$f[10]"
+        worktrees_branch_after "$WT_IDS[i]" "$f[3]" "$f[4]" "$f[15]" "$f[14]" 1
+        (( PLAIN )) || shown_rows+=( "${f[10]}${t}  ${(l:8:)size_label}  ${(r:12:)${:-would remove}}  ${(r:$path_width:)shown_path}  $WT_BRANCH_NOTE" )
+        continue
+      fi
+      if worktrees_remove_one "$f[4]" "${f[3]:A}" "$include"; then
+        removed+=1
+        [[ $f[10] == <-> ]] && freed+=$f[10]
+        (( PLAIN )) && print -r -- "removed${t}$WT_IDS[i]${t}$f[3]${t}$f[10]"
+        worktrees_branch_after "$WT_IDS[i]" "$f[3]" "$f[4]" "$f[15]" "$f[14]" 0
+        (( PLAIN )) || shown_rows+=( "${f[10]}${t}  ${(l:8:)size_label}  ${C_GREEN}${(r:12:)${:-removed}}${C_RESET}  ${(r:$path_width:)shown_path}  $WT_BRANCH_NOTE" )
+      else
+        failed+=1
+        if (( PLAIN )); then
+          print -r -- "failed${t}$WT_IDS[i]${t}$f[3]${t}$WT_ERROR"
+        else
+          shown_rows+=( "${f[10]}${t}  ${(l:8:)size_label}  ${C_RED}${(r:12:)${:-failed}}${C_RESET}  ${(r:$path_width:)shown_path}  ${C_RED}$WT_ERROR${C_RESET}" )
+        fi
+      fi
+    done
+    progress_stop
+    rows_by_size_desc 1 "${shown_rows[@]}"
+    for row in $reply; do
+      say "${row#*$'\t'}"
+    done
+  done
+  for p in $WT_SELECT; do
+    (( ${found_paths[(Ie)$p]} )) || worktrees_report_skipped - "$p" not_found
+  done
+  if (( PLAIN )); then
+    print -r -- "summary${t}$removed${t}$freed${t}$failed${t}$blocked${t}$WT_BRANCHES_DELETED${t}$WT_BRANCHES_KEPT"
+  else
+    local verb=Removed branch_verb=deleted
+    (( dry )) && verb="Would remove" branch_verb="would be deleted"
+    say "${C_BOLD}$verb $removed worktree(s)${C_RESET}, $(worktrees_human_kb $freed); $failed failed, $blocked blocked. $WT_BRANCHES_DELETED branch(es) $branch_verb, $WT_BRANCHES_KEPT kept. Sessions are kept."
+    if (( ${#not_removed_rows} )); then
+      local list_target=$WT_IDS[1]
+      (( ${#WT_IDS} > 1 )) && list_target=--all
+      say "Not removed:"
+      local -a WT_ROWS
+      WT_ROWS=( "${not_removed_rows[@]}" )
+      worktrees_print_breakdown "$min_days" 0
+      say "${C_DIM}Sizes and reasons per worktree: claude-profiles worktrees $list_target list --older-than $min_days${C_RESET}"
+    fi
+  fi
+  if (( failed )); then
+    return 1
+  elif (( blocked )); then
+    return 3
+  fi
+  return 0
+}
+
+cmd_worktrees() {
+  local usage_text="worktrees <slug>|main|--all [list] [--older-than DAYS] [--include-uncommitted] [--no-size] [--plain] | worktrees <slug>|main|--all clean [--path PATH]... [--older-than DAYS] [--include-uncommitted] [--keep-branches] [--keep-branch PATH]... [--delete-branch PATH]... [--delete-unsaved-branches] [--dry-run] [--yes] [--plain]"
+  local all=0 days=$WORKTREES_DEFAULT_DAYS include=0 sizes=1 dry=0 target="" action=list
+  local -i WT_KEEP_BRANCHES=0 WT_DELETE_UNSAVED=0
+  local -a positional
+  local -a WT_SELECT WT_DELETE_BRANCH WT_KEEP_BRANCH
+  local kept_path
+  WT_SELECT=() WT_DELETE_BRANCH=() WT_KEEP_BRANCH=()
+  while (( $# )); do
+    case $1 in
+      --all) all=1; shift ;;
+      --older-than) need_value "$@"; days=$2; shift 2 ;;
+      --path)
+        need_value "$@"
+        [[ $2 == /* ]] || usage_error "--path needs an absolute path"
+        WT_SELECT+=( "$2" )
+        shift 2
+        ;;
+      --include-uncommitted) include=1; shift ;;
+      --keep-branches) WT_KEEP_BRANCHES=1; shift ;;
+      --delete-unsaved-branches) WT_DELETE_UNSAVED=1; shift ;;
+      --delete-branch)
+        need_value "$@"
+        [[ $2 == /* ]] || usage_error "--delete-branch needs an absolute path"
+        WT_DELETE_BRANCH+=( "$2" )
+        shift 2
+        ;;
+      --keep-branch)
+        need_value "$@"
+        [[ $2 == /* ]] || usage_error "--keep-branch needs an absolute path"
+        WT_KEEP_BRANCH+=( "$2" )
+        shift 2
+        ;;
+      --no-size) sizes=0; shift ;;
+      --dry-run) dry=1; shift ;;
+      --yes|-y) YES=1; shift ;;
+      --plain) PLAIN=1; shift ;;
+      -*) usage_error "$usage_text" ;;
+      *) positional+=( "$1" ); shift ;;
+    esac
+  done
+  WT_SELECT=( ${(u)WT_SELECT} )
+  if (( all )); then
+    (( ${#positional} <= 1 )) || usage_error "$usage_text"
+    action=${positional[1]:-list}
+  else
+    (( ${#positional} >= 1 && ${#positional} <= 2 )) || usage_error "$usage_text"
+    target=$positional[1]
+    action=${positional[2]:-list}
+  fi
+  [[ $action == (list|clean) ]] || usage_error "$usage_text"
+  [[ $days == [1-9][0-9]# && ${#days} -le 9 ]] || usage_error "--older-than needs a positive whole number of days"
+  if [[ $action == list ]]; then
+    (( ! dry && ! ${#WT_SELECT} && ! WT_KEEP_BRANCHES && ! WT_DELETE_UNSAVED && ! ${#WT_DELETE_BRANCH} && ! ${#WT_KEEP_BRANCH} )) || usage_error "$usage_text"
+  else
+    (( sizes )) || usage_error "$usage_text"
+  fi
+  for kept_path in $WT_KEEP_BRANCH; do
+    worktrees_path_in "$kept_path" "${WT_DELETE_BRANCH[@]}" && usage_error "$kept_path is given to both --keep-branch and --delete-branch"
+  done
+  setup_colors
+  (( all )) && target=--all
+  worktrees_targets "$target" $all
+  if [[ $action == list ]]; then
+    worktrees_list "$target" "$days" $include $sizes
+  else
+    (( dry )) || need_lock
+    local rc=0
+    worktrees_clean "$days" $include $dry || rc=$?
+    exit $rc
+  fi
+}
+
+caches_is_vm_rel() {
+  [[ $1 == vm_bundles/[^/]##.bundle/rootfs.img ]]
+}
+
+caches_valid_item() {
+  local data_dir=$1 rel=$2
+  local item=$data_dir/$rel
+  [[ $rel != *[[:cntrl:]]* && ! -L $item && ${item:A} == "${data_dir:A}/$rel" ]] || return 1
+  if caches_is_vm_rel "$rel"; then
+    [[ -f $item ]]
+  else
+    [[ -d $item ]]
+  fi
+}
+
+caches_add_item() {
+  local data_dir=$1 rel=$2 kind=$3
+  caches_valid_item "$data_dir" "$rel" || return 0
+  CA_ROWS+=( "$rel"$'\t'"$kind" )
+}
+
+caches_measure() {
+  local name=$1 data_dir=$2 row
+  local -a paths
+  for row in $CA_ROWS; do
+    paths+=( "$data_dir/${row%%$'\t'*}" )
+  done
+  du_map "$name · measuring cache folders" "${paths[@]}"
+}
+
+caches_collect() {
+  local data_dir=$1 name partition folder version bundle
+  local -a names
+  CA_ROWS=()
+  [[ -d $data_dir ]] || return 0
+  for name in $CACHES_NAMES; do
+    caches_add_item "$data_dir" "$name" web
+  done
+  for partition in "$data_dir"/Partitions/*(N/:t); do
+    for name in $CACHES_NAMES; do
+      caches_add_item "$data_dir" "Partitions/$partition/$name" pane
+    done
+  done
+  for folder in $CACHES_VERSION_FOLDERS; do
+    names=( "$data_dir/$folder"/<->(.<->)#(N/:t) )
+    names=( ${(On)names} )
+    for version in "${(@)names[2,-1]}"; do
+      caches_add_item "$data_dir" "$folder/$version" version
+    done
+  done
+  for bundle in "$data_dir"/vm_bundles/*.bundle(N/:t); do
+    [[ -e $data_dir/vm_bundles/$bundle/.rootfs.img.origin ]] || continue
+    caches_add_item "$data_dir" "vm_bundles/$bundle/rootfs.img" vm
+  done
+}
+
+caches_print_list() {
+  local id=$1 name=$2 data_dir=$3 app=$4
+  local running=0 row rel kind size label
+  local -a f
+  local -i total_kb=0 sized=0
+  is_running "$app" && running=1
+  progress_start "$name · measuring cache folders"
+  caches_collect "$data_dir"
+  local -a measured ordered
+  caches_measure "$name" "$data_dir"
+  for row in $CA_ROWS; do
+    f=( "${(@ps:\t:)row}" )
+    measured+=( "$row"$'\t'"${DU_KB[$data_dir/$f[1]]:--}" )
+  done
+  rows_by_size_desc 3 "${measured[@]}"
+  ordered=( "${reply[@]}" )
+  progress_stop
+  if (( PLAIN )); then
+    print -r -- "profile"$'\t'"$id"$'\t'"$name"$'\t'"$data_dir"$'\t'"$running"
+  else
+    say "${C_BOLD}$name${C_RESET} ${C_DIM}($id)  $(tilde "$data_dir")${C_RESET}"
+    (( running )) && say "  ${C_YELLOW}the app is running: quit it before clean${C_RESET}"
+    (( ${#CA_ROWS} )) || say "  ${C_DIM}no cache folders found${C_RESET}"
+  fi
+  for row in $ordered; do
+    f=( "${(@ps:\t:)row}" )
+    rel=$f[1] kind=$f[2] size=$f[3]
+    if [[ $size == <-> ]]; then
+      total_kb+=$size
+      sized=1
+    fi
+    if (( PLAIN )); then
+      print -r -- "cache"$'\t'"$id"$'\t'"$rel"$'\t'"$kind"$'\t'"$size"
+    else
+      label=-
+      [[ $size == - ]] || label=$(worktrees_human_kb $size)
+      if [[ $kind == vm ]]; then
+        say "  ${(l:9:)label}  ${(r:8:)kind} $rel  ${C_YELLOW}Cowork VM disk${C_RESET} ${C_DIM}(removed only with --item $id:$rel)${C_RESET}"
+      else
+        say "  ${(l:9:)label}  ${(r:8:)kind} $rel"
+      fi
+    fi
+    if [[ $kind == vm ]]; then
+      CA_VM_COUNT+=1
+      [[ $size == <-> ]] && CA_VM_KB+=$size
+    else
+      CA_TOTAL_COUNT+=1
+      [[ $size == <-> ]] && CA_TOTAL_KB+=$size
+    fi
+  done
+  if (( ! PLAIN && ${#CA_ROWS} && sized )); then
+    say "  ${C_DIM}total $(worktrees_human_kb $total_kb)${C_RESET}"
+  fi
+  return 0
+}
+
+caches_list() {
+  local target=$1 i
+  local -i CA_TOTAL_KB=0 CA_TOTAL_COUNT=0 CA_VM_KB=0 CA_VM_COUNT=0
+  local -a CA_ROWS
+  for (( i = 1; i <= ${#WT_IDS}; i++ )); do
+    caches_print_list "$WT_IDS[i]" "$WT_NAMES[i]" "$WT_DIRS[i]" "$WT_APPS[i]"
+  done
+  (( PLAIN )) && return 0
+  if (( CA_TOTAL_COUNT )); then
+    say "${C_BOLD}$CA_TOTAL_COUNT cache folder(s), $(worktrees_human_kb $CA_TOTAL_KB)${C_RESET} can be removed with: claude-profiles caches $target clean"
+  else
+    say "${C_DIM}No cache folders to remove.${C_RESET}"
+  fi
+  if (( CA_VM_COUNT )); then
+    say "$CA_VM_COUNT Cowork VM disk(s), $(worktrees_human_kb $CA_VM_KB): never part of a plain clean; remove one with: claude-profiles caches $target clean --item ID:REL ${C_DIM}(anything installed inside the VM is lost)${C_RESET}"
+  fi
+}
+
+caches_report_skipped() {
+  local id=$1 rel=$2 reason=$3
+  if (( PLAIN )); then
+    print -r -- "skipped"$'\t'"$id"$'\t'"$rel"$'\t'"$reason"
+  else
+    say "  ${C_DIM}skipped $rel: $reason${C_RESET}"
+  fi
+}
+
+caches_remove_one() {
+  local data_dir=$1 rel=$2 err
+  local item=$data_dir/$rel
+  if ! caches_valid_item "$data_dir" "$rel" || [[ ${item:A} != "${data_dir:A}/"* ]]; then
+    CA_ERROR="not a plain folder inside the data directory"
+    return 1
+  fi
+  if caches_is_vm_rel "$rel"; then
+    if err=$(rm -f -- "$item" 2>&1) && [[ ! -e $item && ! -L $item ]]; then
+      return 0
+    fi
+  elif err=$(rm -rf -- "$item" 2>&1) && [[ ! -e $item ]]; then
+    return 0
+  fi
+  err=${err//[[:cntrl:]]/ }
+  CA_ERROR=${err:-could not remove}
+  return 1
+}
+
+caches_clean() {
+  local dry=$1 i row rel kind size sel_id sel_rel raw
+  local -i removed=0 freed=0 failed=0 blocked=0 count kb k picked selecting=${#CA_ITEMS} has_vm
+  local -a f candidates sel_ids sel_rels sel_hit
+  local t=$'\t'
+  local CA_ERROR="" done_tag=removed done_label=removed vm_note=""
+  local -a CA_ROWS
+  (( dry )) && done_tag=would_remove done_label="would remove"
+  for raw in $CA_ITEMS; do
+    sel_id="" sel_rel=$raw
+    if [[ $raw == *:* && ${WT_IDS[(Ie)${raw%%:*}]} -gt 0 ]]; then
+      sel_id=${raw%%:*}
+      sel_rel=${raw#*:}
+    fi
+    sel_ids+=( "$sel_id" )
+    sel_rels+=( "$sel_rel" )
+    sel_hit+=( 0 )
+  done
+  for (( i = 1; i <= ${#WT_IDS}; i++ )); do
+    progress_start "$WT_NAMES[i] · measuring cache folders"
+    caches_collect "$WT_DIRS[i]"
+    caches_measure "$WT_NAMES[i]" "$WT_DIRS[i]"
+    candidates=()
+    count=0 kb=0 has_vm=0
+    for row in $CA_ROWS; do
+      f=( "${(@ps:\t:)row}" )
+      rel=$f[1] kind=$f[2]
+      (( selecting )) || [[ $kind != vm ]] || continue
+      if (( selecting )); then
+        picked=0
+        for (( k = 1; k <= ${#sel_rels}; k++ )); do
+          if [[ $sel_rels[k] == "$rel" && ( -z $sel_ids[k] || $sel_ids[k] == "$WT_IDS[i]" ) ]]; then
+            picked=1
+            sel_hit[k]=1
+          fi
+        done
+        (( picked )) || continue
+      fi
+      size=${DU_KB[$WT_DIRS[i]/$rel]:--}
+      [[ $kind == vm ]] && has_vm=1
+      candidates+=( "$rel"$'\t'"$size" )
+      count+=1
+      [[ $size == <-> ]] && kb+=$size
+    done
+    progress_stop
+    rows_by_size_desc 2 "${candidates[@]}"
+    candidates=( "${reply[@]}" )
+    if (( ! count )); then
+      (( PLAIN )) || say "$WT_NAMES[i]: ${C_DIM}no cache folders to remove${C_RESET}"
+      continue
+    fi
+    if (( ! dry )) && is_running "$WT_APPS[i]"; then
+      blocked+=1
+      worktrees_report_blocked "$WT_IDS[i]" "$WT_NAMES[i]"
+      continue
+    fi
+    if (( ! dry )); then
+      vm_note=""
+      (( has_vm )) && vm_note=" Claude should download a fresh VM disk the next time Cowork starts (not verified); anything installed inside the VM is lost."
+      confirm "Remove $count cache folder(s) of $WT_NAMES[i] ($(worktrees_human_kb $kb))? The app rebuilds its caches on the next launch; old Claude Code versions are downloaded again if needed.$vm_note" || { (( PLAIN )) || say "Cancelled."; continue; }
+      if is_running "$WT_APPS[i]"; then
+        blocked+=1
+        worktrees_report_blocked "$WT_IDS[i]" "$WT_NAMES[i]"
+        continue
+      fi
+    fi
+    for row in $candidates; do
+      f=( "${(@ps:\t:)row}" )
+      rel=$f[1] size=$f[2]
+      if (( dry )) || caches_remove_one "$WT_DIRS[i]" "$rel"; then
+        removed+=1
+        [[ $size == <-> ]] && freed+=$size
+        if (( PLAIN )); then
+          print -r -- "${done_tag}${t}$WT_IDS[i]${t}$rel${t}$size"
+        else
+          say "  ${done_label} $rel"
+        fi
+      else
+        failed+=1
+        if (( PLAIN )); then
+          print -r -- "failed${t}$WT_IDS[i]${t}$rel${t}$CA_ERROR"
+        else
+          say "  ${C_RED}failed${C_RESET} $rel: $CA_ERROR"
+        fi
+      fi
+    done
+  done
+  for (( k = 1; k <= ${#sel_rels}; k++ )); do
+    (( sel_hit[k] )) || caches_report_skipped "${sel_ids[k]:--}" "$sel_rels[k]" not_found
+  done
+  if (( PLAIN )); then
+    print -r -- "summary${t}$removed${t}$freed${t}$failed${t}$blocked"
+  else
+    local verb=Removed
+    (( dry )) && verb="Would remove"
+    say "${C_BOLD}$verb $removed cache folder(s)${C_RESET}, $(worktrees_human_kb $freed); $failed failed, $blocked blocked."
+  fi
+  if (( failed )); then
+    return 1
+  elif (( blocked )); then
+    return 3
+  fi
+  return 0
+}
+
+cmd_caches() {
+  local usage_text="caches <slug>|main|--all [list] [--plain] | caches <slug>|main|--all clean [--item [ID:]REL]... [--dry-run] [--yes] [--plain]"
+  local all=0 dry=0 target="" action=list
+  local -a positional
+  local -a CA_ITEMS
+  CA_ITEMS=()
+  while (( $# )); do
+    case $1 in
+      --all) all=1; shift ;;
+      --item) need_value "$@"; CA_ITEMS+=( "$2" ); shift 2 ;;
+      --dry-run) dry=1; shift ;;
+      --yes|-y) YES=1; shift ;;
+      --plain) PLAIN=1; shift ;;
+      -*) usage_error "$usage_text" ;;
+      *) positional+=( "$1" ); shift ;;
+    esac
+  done
+  CA_ITEMS=( ${(u)CA_ITEMS} )
+  if (( all )); then
+    (( ${#positional} <= 1 )) || usage_error "$usage_text"
+    action=${positional[1]:-list}
+  else
+    (( ${#positional} >= 1 && ${#positional} <= 2 )) || usage_error "$usage_text"
+    target=$positional[1]
+    action=${positional[2]:-list}
+  fi
+  [[ $action == (list|clean) ]] || usage_error "$usage_text"
+  if [[ $action == list ]]; then
+    (( ! dry && ! ${#CA_ITEMS} )) || usage_error "$usage_text"
+  fi
+  setup_colors
+  (( all )) && target=--all
+  worktrees_targets "$target" $all
+  if [[ $action == clean ]] && (( all )); then
+    local item
+    for item in $CA_ITEMS; do
+      [[ $item == *:* && ${WT_IDS[(Ie)${item%%:*}]} -gt 0 ]] || usage_error "with --all, name the profile: ID:REL (got \"${item//[[:cntrl:]]/?}\")"
+    done
+  fi
+  if [[ $action == list ]]; then
+    caches_list "$target"
+  else
+    (( dry )) || need_lock
+    local rc=0
+    caches_clean $dry || rc=$?
+    exit $rc
+  fi
+}
+
+storage_add_loaded_profile() {
+  if (( PROFILE_DESKTOP )); then
+    ST_DATA+=( "$PROFILE_DATA_DIR" ) ST_APPS+=( "$PROFILE_APP" )
+  else
+    ST_DATA+=( - ) ST_APPS+=( - )
+  fi
+  ST_IDS+=( "$SLUG" ) ST_NAMES+=( "$PROFILE_NAME" ) ST_CONFIG+=( "$PROFILE_CONFIG_DIR" )
+}
+
+storage_targets() {
+  local target=$1 all=$2 s
+  local SLUG ${PROFILE_KEYS[@]}
+  local -a PROFILE_DIRS reply
+  typeset -ga ST_IDS ST_NAMES ST_DATA ST_CONFIG ST_APPS
+  ST_IDS=() ST_NAMES=() ST_DATA=() ST_CONFIG=() ST_APPS=()
+  if (( all )) || [[ $target == main || $target == default ]]; then
+    ST_IDS+=( main ) ST_NAMES+=( Claude ) ST_DATA+=( "$MAIN_DATA_DIR" ) ST_CONFIG+=( "$MAIN_CONFIG_DIR" ) ST_APPS+=( "$SOURCE_APP" )
+  fi
+  if (( all )); then
+    all_slugs
+    for s in $reply; do
+      profile_load "$s"
+      storage_add_loaded_profile
+    done
+  elif [[ $target != main && $target != default ]]; then
+    profile_load "$target"
+    storage_add_loaded_profile
+  fi
+}
+
+storage_running() {
+  [[ $1 != - ]] && is_running "$1"
+}
+
+storage_shared_owner() {
+  local id=$1 cfg=$2 k
+  local real=${cfg:A}
+  ST_OWNER=""
+  for (( k = 1; k <= ${#ST_SEEN_REALS}; k++ )); do
+    if [[ $ST_SEEN_REALS[k] == "$real" ]]; then
+      ST_OWNER=$ST_SEEN_IDS[k]
+      return 0
+    fi
+  done
+  ST_SEEN_REALS+=( "$real" )
+  ST_SEEN_IDS+=( "$id" )
+  return 1
+}
+
+storage_kind() {
+  local where=$1 entry=$2
+  if [[ $where == data ]]; then
+    if (( ${CACHES_NAMES[(Ie)$entry]} )); then
+      REPLY=cache
+      return 0
+    fi
+    case $entry in
+      Partitions) REPLY=panes ;;
+      claude-code|claude-code-vm) REPLY=versions ;;
+      vm_bundles) REPLY=vm ;;
+      claude-code-sessions|local-agent-mode-sessions) REPLY=sessions ;;
+      *) REPLY=other ;;
+    esac
+  else
+    case $entry in
+      projects) REPLY=history ;;
+      plugins) REPLY=plugins ;;
+      *) REPLY=other ;;
+    esac
+  fi
+}
+
+storage_tool() {
+  case $1 in
+    cache|panes|versions|vm) REPLY=caches ;;
+    history) REPLY=history ;;
+    worktrees) REPLY=worktrees ;;
+    *) REPLY=- ;;
+  esac
+}
+
+storage_scan_dir() {
+  local id=$1 where=$2 dir=$3 entry name size
+  local -a entries measured
+  [[ $dir != - && -d $dir ]] || return 0
+  entries=( "$dir"/*(DN) )
+  for entry in $entries; do
+    [[ -L $entry ]] || measured+=( "$entry" )
+  done
+  du_map "$ST_NAMES[i] · measuring the $where dir" "${measured[@]}"
+  for entry in $entries; do
+    name=${${entry:t}//[[:cntrl:]]/?}
+    if [[ -L $entry ]]; then
+      size=0
+    else
+      size=${DU_KB[$entry]:--}
+    fi
+    storage_kind "$where" "${entry:t}"
+    storage_area "$id" "$where" "$name" "$REPLY" "$size" "$dir/$name"
+  done
+  return 0
+}
+
+storage_area() {
+  local id=$1 where=$2 entry=$3 kind=$4 size=$5 shown=$6
+  local t=$'\t'
+  storage_tool "$kind"
+  [[ $size == <-> ]] && ST_TARGET_KB+=$size
+  if (( PLAIN )); then
+    print -r -- "area${t}$id${t}$where${t}$entry${t}$kind${t}$size${t}$REPLY"
+  else
+    ST_HUMAN+=( "${(l:15::0:)${size//-/0}}${t}$size${t}$kind${t}$shown${t}$REPLY" )
+  fi
+}
+
+storage_worktrees_kb() {
+  local data=$1 cfg=$2 lines line wpath real
+  local -a fields paths
+  local -i sum=0
+  REPLY=0
+  [[ $data != - && -f $data/git-worktrees.json ]] || return 0
+  lines=$(jxa worktrees.js "$data" 2>/dev/null) || return 0
+  local data_real=${data:A} cfg_real=${cfg:A}
+  for line in "${(@f)lines}"; do
+    [[ -n $line ]] || continue
+    fields=( "${(@ps:\t:)line}" )
+    wpath=$fields[2]
+    [[ $wpath == /* && -d $wpath && ! -L $wpath ]] || continue
+    real=${wpath:A}
+    [[ $real == "$data_real" || $real == "$data_real"/* || $real == "$cfg_real" || $real == "$cfg_real"/* ]] && continue
+    (( ${paths[(Ie)$real]} )) && continue
+    paths+=( "$real" )
+  done
+  du_map "$ST_NAMES[i] · measuring Code worktrees" "${paths[@]}"
+  for real in $paths; do
+    [[ ${DU_KB[$real]:-} == <-> ]] && sum+=$DU_KB[$real]
+  done
+  REPLY=$sum
+}
+
+storage_print_human() {
+  local id=$1 row
+  local -a f sorted tools
+  local -i small_count=0 small_kb=0
+  sorted=( ${(O)ST_HUMAN} )
+  for row in $sorted; do
+    f=( "${(@ps:\t:)row}" )
+    if [[ $f[2] == <-> ]] && (( f[2] > 0 )) && [[ $f[5] != - ]] && (( ! ${tools[(Ie)$f[5]]} )); then
+      tools+=( "$f[5]" )
+    fi
+    if [[ $f[2] == <-> ]] && (( f[2] < 1024 )); then
+      small_count+=1
+      small_kb+=$f[2]
+      continue
+    fi
+    local label=-
+    [[ $f[2] == - ]] || label=$(worktrees_human_kb $f[2])
+    say "  ${(l:9:)label}  ${(r:10:)f[3]} $(tilde "$f[4]")"
+  done
+  (( small_count )) && say "  ${C_DIM}$small_count small item(s), $(worktrees_human_kb $small_kb)${C_RESET}"
+  say "  ${C_BOLD}total $(worktrees_human_kb $ST_TARGET_KB)${C_RESET}"
+  if (( ${#tools} )); then
+    local hint="" tool
+    for tool in caches worktrees history; do
+      (( ${tools[(Ie)$tool]} )) || continue
+      [[ -n $hint ]] && hint+=" | "
+      hint+="$tool $id"
+    done
+    say "  ${C_DIM}clean with: claude-profiles $hint${C_RESET}"
+  fi
+  return 0
+}
+
+storage_report() {
+  local i id data cfg running t=$'\t'
+  local -a ST_SEEN_REALS ST_SEEN_IDS ST_HUMAN
+  local -i grand=0 ST_TARGET_KB
+  local ST_OWNER
+  for (( i = 1; i <= ${#ST_IDS}; i++ )); do
+    id=$ST_IDS[i] data=$ST_DATA[i] cfg=$ST_CONFIG[i]
+    running=0
+    storage_running "$ST_APPS[i]" && running=1
+    ST_TARGET_KB=0
+    ST_HUMAN=()
+    if (( PLAIN )); then
+      print -r -- "profile${t}$id${t}$ST_NAMES[i]${t}$data${t}$cfg${t}$running"
+    else
+      (( i > 1 )) && say ""
+      local where="config $(tilde "$cfg")"
+      [[ $data == - ]] || where="data $(tilde "$data"), $where"
+      say "${C_BOLD}$ST_NAMES[i]${C_RESET} ${C_DIM}($id)  $where${C_RESET}"
+      (( running )) && say "  ${C_YELLOW}the app is running: quit it before cleaning caches, worktrees or history${C_RESET}"
+    fi
+    progress_start "$ST_NAMES[i] · measuring the data dir"
+    storage_scan_dir "$id" data "$data"
+    progress_note "$ST_NAMES[i] · measuring the config dir"
+    if storage_shared_owner "$id" "$cfg"; then
+      if (( PLAIN )); then
+        print -r -- "shared${t}$id${t}$cfg${t}$ST_OWNER"
+      else
+        ST_SHARED_NOTE="  ${C_DIM}config dir $(tilde "$cfg") is shared with $ST_OWNER: counted there${C_RESET}"
+      fi
+    else
+      ST_SHARED_NOTE=""
+      storage_scan_dir "$id" config "$cfg"
+    fi
+    storage_worktrees_kb "$data" "$cfg"
+    progress_stop
+    storage_area "$id" worktrees - worktrees "$REPLY" "Code worktrees (in their repositories)"
+    if (( PLAIN )); then
+      print -r -- "total${t}$id${t}$ST_TARGET_KB"
+    else
+      storage_print_human "$id"
+      [[ -n $ST_SHARED_NOTE ]] && say "$ST_SHARED_NOTE"
+    fi
+    grand+=$ST_TARGET_KB
+  done
+  if (( ! PLAIN && ${#ST_IDS} > 1 )); then
+    say ""
+    say "${C_BOLD}Grand total $(worktrees_human_kb $grand)${C_RESET}"
+  fi
+}
+
+cmd_storage() {
+  local usage_text="storage <slug>|main|--all [--plain]"
+  local all=0 target=""
+  local -a positional
+  local ST_SHARED_NOTE=""
+  while (( $# )); do
+    case $1 in
+      --all) all=1; shift ;;
+      --plain) PLAIN=1; shift ;;
+      -*) usage_error "$usage_text" ;;
+      *) positional+=( "$1" ); shift ;;
+    esac
+  done
+  if (( all )); then
+    (( ! ${#positional} )) || usage_error "$usage_text"
+    target=--all
+  else
+    (( ${#positional} == 1 )) || usage_error "$usage_text"
+    target=$positional[1]
+  fi
+  setup_colors
+  storage_targets "$target" $all
+  storage_report
+}
+
+history_valid_project() {
+  local cfg=$1 name=$2
+  local p=$cfg/projects/$name
+  [[ -n $name && $name != */* && $name != .* && $name != *[[:cntrl:]]* && -d $p && ! -L $p && ${p:A} == "${cfg:A}/projects/$name" ]]
+}
+
+history_collect() {
+  local cfg=$1 p name cwd f kb last
+  local -a paths files newest mt
+  HI_ROWS=()
+  [[ -d $cfg/projects ]] || return 0
+  for p in "$cfg"/projects/*(N/); do
+    history_valid_project "$cfg" "${p:t}" && paths+=( "$p" )
+  done
+  du_map "$ST_NAMES[i] · reading conversation history" "${paths[@]}"
+  for p in $paths; do
+    name=${p:t}
+    files=( "$p"/*.jsonl(N.om) )
+    cwd=-
+    for f in ${files[1,3]}; do
+      f=$(extract_cwd "$f" || true)
+      if [[ -n $f ]]; then
+        cwd=${f//[[:cntrl:]]/?}
+        break
+      fi
+    done
+    newest=( "$p"/*(DNom[1]) )
+    last=-
+    if (( ${#newest} )) && zstat -L -A mt +mtime -- "$newest[1]" 2>/dev/null; then
+      last=$(( (EPOCHSECONDS - mt[1]) / WORKTREES_SECONDS_PER_DAY ))
+      (( last >= 0 )) || last=0
+    fi
+    kb=${DU_KB[$p]:--}
+    HI_ROWS+=( "$name"$'\t'"$cwd"$'\t'"${#files}"$'\t'"$kb"$'\t'"$last" )
+  done
+  return 0
+}
+
+history_is_current() {
+  local name=$1 cwd=$2
+  local here=${PWD:A}
+  [[ $name == "${PWD//[^A-Za-z0-9]/-}" || $name == "${here//[^A-Za-z0-9]/-}" ]] && return 0
+  if [[ -n ${CLAUDE_PROJECT_DIR:-} && $name == "${CLAUDE_PROJECT_DIR//[^A-Za-z0-9]/-}" ]]; then
+    return 0
+  fi
+  [[ $cwd != - ]] || return 1
+  [[ $PWD == "$cwd" || $PWD == "$cwd"/* || $here == "$cwd" || $here == "$cwd"/* ]]
+}
+
+history_last_label() {
+  case $1 in
+    -) REPLY=- ;;
+    0) REPLY=today ;;
+    1) REPLY="1 day ago" ;;
+    *) REPLY="$1 days ago" ;;
+  esac
+}
+
+history_print_list() {
+  local i=$1 id=$ST_IDS[i] cfg=$ST_CONFIG[i] row t=$'\t' label
+  local -a f sorted keyed
+  local -i running=0 total=0
+  storage_running "$ST_APPS[i]" && running=1
+  if (( PLAIN )); then
+    print -r -- "profile${t}$id${t}$ST_NAMES[i]${t}$cfg${t}$running"
+  else
+    (( i > 1 )) && say ""
+    say "${C_BOLD}$ST_NAMES[i]${C_RESET} ${C_DIM}($id)  $(tilde "$cfg")${C_RESET}"
+  fi
+  if storage_shared_owner "$id" "$cfg"; then
+    if (( PLAIN )); then
+      print -r -- "shared${t}$id${t}$cfg${t}$ST_OWNER"
+    else
+      say "  ${C_DIM}config dir shared with $ST_OWNER: listed there${C_RESET}"
+    fi
+    return 0
+  fi
+  (( running && ! PLAIN )) && say "  ${C_YELLOW}the app is running: quit it before clean${C_RESET}"
+  progress_start "$ST_NAMES[i] · reading conversation history"
+  history_collect "$cfg"
+  progress_stop
+  for row in $HI_ROWS; do
+    f=( "${(@ps:\t:)row}" )
+    [[ $f[4] == <-> ]] && total+=$f[4]
+    if (( PLAIN )); then
+      print -r -- "project${t}$id${t}$f[1]${t}$f[2]${t}$f[3]${t}$f[4]${t}$f[5]"
+    else
+      keyed+=( "${(l:15::0:)${f[4]//-/0}}${t}$row" )
+    fi
+  done
+  (( PLAIN )) && { HI_TOTAL_KB+=$total; HI_TOTAL_COUNT+=${#HI_ROWS}; return 0; }
+  (( ${#HI_ROWS} )) || say "  ${C_DIM}no session history${C_RESET}"
+  sorted=( ${(O)keyed} )
+  for row in $sorted; do
+    f=( "${(@ps:\t:)row}" )
+    label=-
+    [[ $f[5] == - ]] || label=$(worktrees_human_kb $f[5])
+    history_last_label "$f[6]"
+    local shown=$f[3]
+    [[ $shown == - ]] && shown=$f[2] || shown=$(tilde "$shown")
+    say "  ${(l:9:)label}  ${(l:4:)f[4]} session(s)  ${(r:14:)REPLY}  $shown"
+  done
+  (( ${#HI_ROWS} )) && say "  ${C_DIM}total $(worktrees_human_kb $total) in ${#HI_ROWS} project(s)${C_RESET}"
+  HI_TOTAL_KB+=$total
+  HI_TOTAL_COUNT+=${#HI_ROWS}
+}
+
+history_list() {
+  local target=$1 i
+  local -a ST_SEEN_REALS ST_SEEN_IDS HI_ROWS
+  local -i HI_TOTAL_KB=0 HI_TOTAL_COUNT=0
+  local ST_OWNER
+  for (( i = 1; i <= ${#ST_IDS}; i++ )); do
+    history_print_list $i
+  done
+  (( PLAIN )) && return 0
+  if (( HI_TOTAL_COUNT )); then
+    say "${C_BOLD}$HI_TOTAL_COUNT project(s), $(worktrees_human_kb $HI_TOTAL_KB)${C_RESET}; delete one with: claude-profiles history $target clean --project ID:NAME"
+  fi
+}
+
+history_report() {
+  local tag=$1 id=$2 name=$3 detail=$4
+  local t=$'\t'
+  if (( PLAIN )); then
+    print -r -- "${tag}${t}$id${t}$name${t}$detail"
+    return 0
+  fi
+  case $tag in
+    removed) say "  removed $name" ;;
+    would_remove) say "  would remove $name" ;;
+    failed) say "  ${C_RED}failed${C_RESET} $name: $detail" ;;
+    skipped)
+      if [[ $detail == current ]]; then
+        say "  ${C_DIM}skipped $name: it is the project of the current folder or session${C_RESET}"
+      else
+        say "  ${C_DIM}skipped $name: not found${C_RESET}"
+      fi
+      ;;
+  esac
+}
+
+history_remove_one() {
+  local cfg=$1 name=$2 err
+  local p=$cfg/projects/$name
+  if ! history_valid_project "$cfg" "$name" || [[ ${p:A} != "${cfg:A}/projects/"* ]]; then
+    HI_ERROR="not a plain project folder inside the config directory"
+    return 1
+  fi
+  if err=$(rm -rf -- "$p" 2>&1) && [[ ! -e $p ]]; then
+    return 0
+  fi
+  err=${err//[[:cntrl:]]/ }
+  HI_ERROR=${err:-could not remove}
+  return 1
+}
+
+history_in_use() {
+  storage_running "$1" || config_dir_running "$2"
+}
+
+history_clean() {
+  local dry=$1 i row raw sel_id sel_name id cfg
+  local -i removed=0 freed=0 failed=0 blocked=0 count kb k picked
+  local -a f candidates sel_ids sel_names sel_hit ST_SEEN_REALS ST_SEEN_IDS HI_ROWS
+  local t=$'\t' HI_ERROR="" ST_OWNER done_tag=removed
+  (( dry )) && done_tag=would_remove
+  for raw in $HI_PROJECTS; do
+    sel_id="" sel_name=$raw
+    if [[ $raw == *:* && ${ST_IDS[(Ie)${raw%%:*}]} -gt 0 ]]; then
+      sel_id=${raw%%:*}
+      sel_name=${raw#*:}
+    fi
+    sel_ids+=( "$sel_id" )
+    sel_names+=( "$sel_name" )
+    sel_hit+=( 0 )
+  done
+  for (( i = 1; i <= ${#ST_IDS}; i++ )); do
+    id=$ST_IDS[i] cfg=$ST_CONFIG[i]
+    storage_shared_owner "$id" "$cfg" && continue
+    progress_start "$ST_NAMES[i] · reading conversation history"
+    history_collect "$cfg"
+    progress_stop
+    candidates=()
+    count=0 kb=0
+    for row in $HI_ROWS; do
+      f=( "${(@ps:\t:)row}" )
+      picked=0
+      for (( k = 1; k <= ${#sel_names}; k++ )); do
+        if [[ $sel_names[k] == "$f[1]" && ( -z $sel_ids[k] || $sel_ids[k] == "$id" ) ]]; then
+          picked=1
+          sel_hit[k]=1
+        fi
+      done
+      (( picked )) || continue
+      if history_is_current "$f[1]" "$f[2]"; then
+        history_report skipped "$id" "$f[1]" current
+        continue
+      fi
+      candidates+=( "$f[1]"$'\t'"$f[4]" )
+      count+=1
+      [[ $f[4] == <-> ]] && kb+=$f[4]
+    done
+    (( count )) || continue
+    if (( ! dry )) && history_in_use "$ST_APPS[i]" "$cfg"; then
+      blocked+=1
+      worktrees_report_blocked "$id" "$ST_NAMES[i]"
+      continue
+    fi
+    if (( ! dry )); then
+      confirm "Delete the history of $count project(s) ($(worktrees_human_kb $kb))? Those conversations can no longer be resumed or read; this cannot be undone." || { (( PLAIN )) || say "Cancelled."; continue; }
+      if history_in_use "$ST_APPS[i]" "$cfg"; then
+        blocked+=1
+        worktrees_report_blocked "$id" "$ST_NAMES[i]"
+        continue
+      fi
+    fi
+    (( PLAIN )) || say "$ST_NAMES[i] ${C_DIM}($id)${C_RESET}"
+    for row in $candidates; do
+      f=( "${(@ps:\t:)row}" )
+      if (( dry )) || history_remove_one "$cfg" "$f[1]"; then
+        removed+=1
+        [[ $f[2] == <-> ]] && freed+=$f[2]
+        history_report "$done_tag" "$id" "$f[1]" "$f[2]"
+      else
+        failed+=1
+        history_report failed "$id" "$f[1]" "$HI_ERROR"
+      fi
+    done
+  done
+  for (( k = 1; k <= ${#sel_names}; k++ )); do
+    (( sel_hit[k] )) || history_report skipped "${sel_ids[k]:--}" "${sel_names[k]//[[:cntrl:]]/?}" not_found
+  done
+  if (( PLAIN )); then
+    print -r -- "summary${t}$removed${t}$freed${t}$failed${t}$blocked"
+  else
+    local verb=Deleted
+    (( dry )) && verb="Would delete"
+    say "${C_BOLD}$verb the history of $removed project(s)${C_RESET}, $(worktrees_human_kb $freed); $failed failed, $blocked blocked."
+  fi
+  if (( failed )); then
+    return 1
+  elif (( blocked )); then
+    return 3
+  fi
+  return 0
+}
+
+cmd_history() {
+  local usage_text="history <slug>|main|--all [list] [--plain] | history <slug>|main|--all clean --project [ID:]NAME... [--dry-run] [--yes] [--plain]"
+  local all=0 dry=0 target="" action=list
+  local -a positional
+  local -a HI_PROJECTS
+  HI_PROJECTS=()
+  while (( $# )); do
+    case $1 in
+      --all) all=1; shift ;;
+      --project) need_value "$@"; HI_PROJECTS+=( "$2" ); shift 2 ;;
+      --dry-run) dry=1; shift ;;
+      --yes|-y) YES=1; shift ;;
+      --plain) PLAIN=1; shift ;;
+      -*) usage_error "$usage_text" ;;
+      *) positional+=( "$1" ); shift ;;
+    esac
+  done
+  HI_PROJECTS=( ${(u)HI_PROJECTS} )
+  if (( all )); then
+    (( ${#positional} <= 1 )) || usage_error "$usage_text"
+    action=${positional[1]:-list}
+  else
+    (( ${#positional} >= 1 && ${#positional} <= 2 )) || usage_error "$usage_text"
+    target=$positional[1]
+    action=${positional[2]:-list}
+  fi
+  [[ $action == (list|clean) ]] || usage_error "$usage_text"
+  if [[ $action == list ]]; then
+    (( ! dry && ! ${#HI_PROJECTS} )) || usage_error "$usage_text"
+  else
+    (( ${#HI_PROJECTS} )) || usage_error "$usage_text"
+  fi
+  setup_colors
+  (( all )) && target=--all
+  storage_targets "$target" $all
+  if [[ $action == clean ]] && (( all )); then
+    local project
+    for project in $HI_PROJECTS; do
+      [[ $project == *:* && ${ST_IDS[(Ie)${project%%:*}]} -gt 0 ]] || usage_error "with --all, name the profile: ID:NAME (got \"${project//[[:cntrl:]]/?}\")"
+    done
+  fi
+  if [[ $action == list ]]; then
+    history_list "$target"
+  else
+    (( dry )) || need_lock
+    local rc=0
+    history_clean $dry || rc=$?
+    exit $rc
+  fi
 }
 
 default_shell_name() {
@@ -4963,6 +6714,10 @@ main() {
     shell-init) cmd_shell_init "$@" ;;
     dirs) cmd_dirs "$@" ;;
     projects) cmd_projects "$@" ;;
+    worktrees) cmd_worktrees "$@" ;;
+    caches) cmd_caches "$@" ;;
+    storage) cmd_storage "$@" ;;
+    history) cmd_history "$@" ;;
     legacy-agents) cmd_legacy_agents "$@" ;;
     status) cmd_status "$@" ;;
     install-cli) cmd_install_cli "$@" ;;

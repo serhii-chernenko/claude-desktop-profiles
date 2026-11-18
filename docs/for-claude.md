@@ -38,6 +38,10 @@ These all accept `--yes` and the read-only ones accept `--plain`. Run `bin/claud
 | Shell hook in `~/.zshrc` | `shell-init status --plain`, then `shell-init install` or `shell-init uninstall` (an idempotent marked block; ask first, because it edits a shell startup file) |
 | Old hand-made LaunchAgents | `legacy-agents --plain` to list, `legacy-agents disable LABEL --yes` to unload and rename one (ask first) |
 | Move a launcher-mode profile to self mode (one app) | `show <slug> --plain` prints `mode` `self` or `launcher` (and `layout` `self`, `hidden` or `legacy`). For `launcher`: quit the copy (ask first), `migrate-layout <slug> --yes`. It rebuilds the copy from Claude.app with the boot file, puts it at `/Applications/Claude <Name>.app` in place of the launcher, removes the hidden copy and refreshes the Dock pin. It exits 3 and prints `agent` rows when an old LaunchAgent would recreate the copy; ask the user, then `legacy-agents disable LABEL --yes` and retry. A plain `build` does the same move; `build <slug> --mode launcher` goes back |
+| Idle Code-tab git worktrees | `worktrees <slug>\|main\|--all [list] [--older-than DAYS] --plain`; `worktrees ... clean [--dry-run] --yes` removes them with git (ask first; the profile's app must be quit; sessions stay; a branch whose every commit is also on another branch, tag or remote is deleted, an unsaved one is kept unless `--delete-branch PATH` or `--delete-unsaved-branches`; `--keep-branches` or `--keep-branch PATH` keep them; the default branch and `main`, `master`, `develop`, `trunk` are never deleted; a dry run simulates the deletion order) |
+| App caches and older Claude Code versions | `caches <slug>\|main\|--all [list] --plain`; `caches ... clean [--item [ID:]REL]... [--dry-run] --yes` deletes them (ask first; the profile's app must be quit; with `--all` every `--item` needs its `ID:` prefix; sign-ins and sessions are not touched; the Cowork VM disk, kind `vm`, only goes when named with `--item`) |
+| Where the disk space goes | `storage <slug>\|main\|--all --plain` (read-only): every entry of the data dir and config dir with its size, kind and the cleaning command, plus the Code worktrees |
+| Old Claude Code conversations | `history <slug>\|main\|--all [list] --plain`; `history ... clean --project [ID:]NAME... [--dry-run] --yes` deletes a project's history for good (ask first, naming each project; with `--all` every `--project` needs its `ID:` prefix; the profile's app, other profiles' apps on the same config dir and Claude Code CLI sessions on it must be quit) |
 | CLI on the PATH | `install-cli` copies the tool to `~/.local/share/claude-profiles` and links `~/.local/bin/claude-profiles` |
 
 `setup` is never in this list: it is always run by the human in Terminal, because it needs their login password. The native app does the same: its **Set Up** button opens Terminal for the user and never handles the password.
@@ -505,6 +509,57 @@ killall Dock
 ```
 
 Deleting `$DATA_DIR` signs the account out of that copy; deleting `$CONFIG_DIR` deletes its session history. Do either only on an explicit request.
+
+## 12b. Clean up old Code-tab worktrees
+
+Use `claude-profiles worktrees <slug>|main|--all [list] [--older-than DAYS]` to see them (read-only, `--plain` for rows) and `... clean --yes` to remove them; run `clean --dry-run` first. Ask the user before `clean`, and quit the profile's app first (ask: they can lose open conversations). Background: [how-it-works.md](how-it-works.md), fact 14. By hand, with `$DATA_DIR` set to the profile's data dir (`~/Library/Application Support/Claude` for regular Claude):
+
+```zsh
+plutil -p "$DATA_DIR/git-worktrees.json"
+```
+
+Each entry has a `path`, a `baseRepo`, a `branch` and a `leasedBy` (the owning session id, or null for a spare). The session of an entry is `$DATA_DIR/claude-code-sessions/*/*/<leasedBy>.json`; `lastActivityAt` (milliseconds) is its last use. For an entry you consider removing, check all of this first and skip it if any check fails:
+
+```zsh
+WT=...; REPO=...
+git -C "$REPO" worktree list --porcelain | grep -Fx "worktree $WT"
+test ! -e "$WT/.worktree-keep"
+git -C "$WT" status --porcelain --untracked-files=normal
+```
+
+The entry must pass every one of these, otherwise skip it:
+
+- `path` and `baseRepo` are absolute, and `baseRepo` is the first `worktree` line of `git -C "$REPO" worktree list --porcelain` (the main checkout, not another worktree);
+- the resolved path (`realpath`) is listed there and lies under `<main checkout>/.claude/worktrees/`, the only place Claude Desktop creates worktrees; no other registry entry resolves to the same path;
+- you are not inside it, it has no `.worktree-keep`, its HEAD is on a branch, or detached at a commit that `git for-each-ref --contains HEAD` still finds in a branch, tag or remote-tracking ref, and `status` prints nothing;
+- its session is not starred (`isStarred`), and its last activity is known and older than the days you chose (30 by default).
+
+Then run git with the resolved path (never a relative path from the registry):
+
+```zsh
+git -C "$REPO" worktree remove -- "$(realpath "$WT")"
+```
+
+Removing a worktree deletes its whole directory, including gitignored files such as `.env`, `node_modules` and build output. The CLI offers `--include-uncommitted`, which passes `--force` and also removes `kept` worktrees (the leftover changes of archived sessions); do that only on an explicit request. In this manual procedure never use `rm -rf`, `--force` or `git worktree prune` (it also drops unrelated worktrees whose directory is only temporarily gone). Delete a removed worktree's branch only when `git -C "$REPO" rev-list --count "refs/heads/$B" --not --exclude="$B" --branches --tags --remotes` prints `0` (every commit is also on another branch, tag or remote; write `--exclude` without `refs/heads/`, or every branch looks saved) and no other worktree has it checked out, then `git -C "$REPO" branch -D -- "$B"`. A branch with unsaved commits stays unless the user asks for it by name. Never edit `git-worktrees.json` or the session files: Claude drops the registry entries of removed directories itself the next time it runs.
+
+
+To remove chosen worktrees regardless of age, pass each one as `clean --path /absolute/path` (repeatable); every other check still applies and a refused path prints a `skipped` row.
+
+After each removal the CLI deletes the worktree's branch when every commit of it is on another branch, tag or remote (`saved` in column 14 of `list --plain`, after the title; column 15 is the branch). An `unsaved:N` branch is kept (`branch_kept ... unsaved N`) unless you pass `--delete-branch /absolute/path` for that worktree or `--delete-unsaved-branches`; with neither flag and a terminal, it asks per branch. `--keep-branches` keeps every branch and `--keep-branch /absolute/path` keeps one (`kept_by_flag`). The repository's default branch and branches named `main`, `master`, `develop` or `trunk` are never deleted, not even with the delete flags (`branch_kept ... protected`). `--dry-run` simulates the deletion order, so two branches sharing a tip found nowhere else show one deleted and one kept, as the real run does. A session resumed after its worktree and branch were removed cannot restore them. Only delete unsaved branches the user named: those commits exist nowhere else.
+
+## 12c. Clear app caches
+
+Use `claude-profiles caches <slug>|main|--all` to list the caches of a desktop data dir and `... clean --dry-run`, then `... clean --yes` (optionally `--item [ID:]REL` per item; with `--all` the `ID:` prefix is required) to delete them. Ask the user first and quit the profile's app. The list is fixed (how-it-works.md, fact 15): the Chromium caches `Cache`, `Code Cache`, `GPUCache` and the other graphics and shader caches, the same names inside `Partitions/<name>/`, and every Claude Code version folder under `claude-code/` and `claude-code-vm/` except the highest. By hand, delete only those directories with `rm -rf`, and only when they are not symlinks. Never delete `Cookies`, `Local Storage`, `IndexedDB`, `Service Worker`, a whole `Partitions/<name>` folder or anything else in the data dir: they hold sign-ins, settings and sessions.
+
+The Cowork VM disk `vm_bundles/<x>.bundle/rootfs.img` (several GB) is listed as kind `vm` when a `.rootfs.img.origin` file sits beside it. A plain `clean` never deletes it; only `--item ID:vm_bundles/<x>.bundle/rootfs.img` does, and only that one file (never `sessiondata.img` or anything else in the bundle). Claude should download a fresh disk the next time Cowork starts (not verified); anything installed inside the VM is lost, so ask first.
+
+## 12d. See where the space goes
+
+`claude-profiles storage <slug>|main|--all` is read-only. Per profile it lists every top-level entry of the data dir (desktop profiles) and of the config dir, unknown ones included, with its size, a kind and the command that can clean it (`caches`, `worktrees`, `history`, or `-` for nothing), plus one row for the Code worktrees, which live in their repositories. A config dir used by an earlier profile (a profile that uses `~/.claude`, for example) is printed once as `shared`. Use it to answer "what takes the space", then point at the cleaning command; never delete anything it lists by hand.
+
+## 12e. Delete old Claude Code conversations
+
+`claude-profiles history <slug>|main|--all` lists the projects of a config dir (`<config>/projects/<NAME>`, one folder per working directory) with the working directory, session count, size and days since last use. `history ... clean --project [ID:]NAME... --dry-run`, then `--yes`, deletes those folders (with `--all` the `ID:` prefix is required). This is permanent: the conversations can no longer be resumed or read. Ask the user and name each project; quit the profile's app first, every other profile's app on the same config dir and any Claude Code CLI session using it (`blocked <id> running`, exit 3). The CLI refuses names with `/` or a leading dot, symlinked folders, anything not in a fresh listing, and the project of the current folder or session (`skipped ... current`). By hand, delete only a real folder directly inside `<config>/projects/`, never the whole `projects` folder or anything else in the config dir.
 
 ## 13. Clean up and report
 

@@ -207,6 +207,194 @@ enum SelfTest {
         expect(Color(hex: "#3a7bd5")?.hexString == "#3a7bd5", "hex color round trip")
         ownerChecks()
         homeChecks()
+        worktreeChecks()
+    }
+
+    private static func worktreeChecks() {
+        let listing = PlainParser.worktrees("""
+        profile\tmain\tClaude\t/Users/example/Library/Application Support/Claude\t0\t1
+        worktree\tmain\tbrave-otter\t/Users/example/.claude/worktrees/brave-otter\t/Users/example/dev/app\tclaude/brave-otter\tarchived\t2026-09-01T10:00:00+0200\t65\t0\t20480\t1\t-\tFix the login flow
+        worktree\tmain\tquiet-fern\t/Users/example/.claude/worktrees/quiet-fern\t/Users/example/dev/app\tclaude/quiet-fern\tkept\t2026-10-20T10:00:00+0200\t16\t1\t-\t0\tdirty\t-
+        profile\twork\tWork\t/Users/example/Library/Application Support/Claude-Work\t1\t1
+        worktree\twork\tspare-1\t/Users/example/.claude/worktrees/spare-1\t-\t-\tpool\t-\t0\t-\t-\t0\trecent\t-\textra\tcolumns
+        worktree\twork\told-one\t/Users/example/.claude/worktrees/old-one\t/Users/example/dev/api\tmain\tfuturestate\t2026-10-30T10:00:00+0100\t6\t0\t512\t1
+        worktree\twork\tshort\t/Users/example/x
+        mystery\trow\there
+        profile\tempty\tEmpty\t-\t0\t0
+        """)
+        expect(listing.profiles.count == 3 && listing.entries.count == 4, "worktrees parser keeps every profile and worktree row and drops short and unknown ones")
+        expect(listing.profiles[0].id == "main" && listing.profiles[0].name == "Claude" && !listing.profiles[0].isRunning && listing.profiles[0].hasRegistry, "worktrees parser reads the main profile row")
+        expect(listing.profiles[1].isRunning && listing.profiles[2].dataDir == nil && !listing.profiles[2].hasRegistry, "worktrees parser reads running, registry and a - data dir")
+        let first = listing.entries[0]
+        expect(first.profileID == "main" && first.name == "brave-otter" && first.repoName == "app" && first.branch == "claude/brave-otter" && first.state == .archived, "worktrees parser reads the identity columns")
+        expect(first.lastActive != nil && first.idleDays == 65 && first.isDirty == false && first.sizeKB == 20480 && first.isEligible && first.reason == nil && first.sessionTitle == "Fix the login flow", "worktrees parser reads the age, size, eligibility and title columns")
+        let kept = listing.entries[1]
+        expect(kept.state == .kept && kept.isDirty == true && kept.sizeKB == nil && !kept.isEligible && kept.reason == "dirty" && kept.sessionTitle == nil, "worktrees parser maps - to nil and keeps the first failing reason")
+        let spare = listing.entries[2]
+        expect(spare.state == .pool && spare.repo == nil && spare.branch == nil && spare.lastActive == nil && spare.isDirty == nil && spare.reason == "recent", "worktrees parser tolerates - in every optional column and extra columns")
+        expect(listing.entries[3].state == .unknown && listing.entries[3].reason == nil && listing.entries[3].sessionTitle == nil, "worktrees parser falls back to the unknown state and tolerates missing trailing columns")
+        expect(Set(listing.entries.map(\.id)).count == listing.entries.count, "worktrees parser gives every row a unique id")
+        let twice = PlainParser.worktrees("worktree\tmain\ta\t/Users/example/dev/app/.claude/worktrees/a\t/Users/example/dev/app\tb\tactive\t2026-09-01T10:00:00+0200\t65\t0\t10\t0\tduplicate\t-\nworktree\tmain\ta\t/Users/example/dev/app/.claude/worktrees/a\t/Users/example/dev/app\tb\tactive\t2026-09-01T10:00:00+0200\t65\t0\t10\t1\t-\t-")
+        expect(twice.entries.count == 2 && twice.entries[0].id != twice.entries[1].id && twice.entries[0].reason == "duplicate", "worktrees parser keeps duplicate rows with distinct ids")
+        let reasons = ["bad_path", "outside", "duplicate", "detached", "no_timestamp"]
+        let reasonRows = reasons.map { "worktree\tmain\tw\t/Users/example/w\t/Users/example/dev/app\tb\tactive\t2026-09-01T10:00:00+0200\t65\t0\t10\t0\t\($0)\t-" }.joined(separator: "\n")
+        let parsedReasons = PlainParser.worktrees(reasonRows).entries.compactMap(\.reason)
+        expect(parsedReasons == reasons, "worktrees parser reads the newer eligibility reasons")
+        expect(parsedReasons.allSatisfy { WorktreeCopy.reasonText($0, days: 30) != $0 }, "every known eligibility reason has plain wording")
+        expect(WorktreeCopy.reasonText("recent", days: 7) == "Used in the last 7 days" && WorktreeCopy.reasonText("future_reason", days: 7) == "future_reason" && WorktreeCopy.reasonText(nil, days: 7) == nil, "worktree reason wording keeps unknown reasons as they are")
+        expect(PlainParser.worktrees("").entries.isEmpty && PlainParser.worktrees("worktree\tmain").entries.isEmpty, "worktrees parser handles empty and truncated output")
+
+        let clean = PlainParser.worktreeClean("""
+        blocked\twork\trunning
+        removed\tmain\t/Users/example/.claude/worktrees/brave-otter\t20480
+        would_remove\tmain\t/Users/example/.claude/worktrees/quiet-fern\t-
+        failed\tmain\t/Users/example/.claude/worktrees/stuck\tfatal: cannot remove a locked working tree
+        removed\tmain
+        summary\t1\t20480\t1\t1\textra
+        mystery\trow
+        """)
+        expect(clean.rows(.blocked).count == 1 && clean.rows(.blocked)[0].profileID == "work" && clean.rows(.blocked)[0].message == "running", "worktree clean parser reads blocked rows")
+        expect(clean.rows(.removed).count == 1 && clean.rows(.removed)[0].sizeKB == 20480 && clean.rows(.wouldRemove).count == 1 && clean.rows(.wouldRemove)[0].sizeKB == nil, "worktree clean parser reads removed and would_remove rows")
+        expect(clean.rows(.failed).count == 1 && clean.rows(.failed)[0].message == "fatal: cannot remove a locked working tree", "worktree clean parser reads failed rows")
+        expect(clean.summary == WorktreeCleanSummary(removed: 1, freedKB: 20480, failed: 1, blocked: 1), "worktree clean parser reads the summary row")
+        expect(PlainParser.worktreeClean("noise").summary == nil && PlainParser.worktreeClean("").rows.isEmpty, "worktree clean parser handles output without a summary")
+        let skipped = PlainParser.worktreeClean("skipped\tmain\t/Users/example/dev/app/.claude/worktrees/a\tdirty\nskipped\t-\t/Users/example/gone\tnot_found\nskipped\tmain")
+        expect(skipped.rows(.skipped).map(\.message) == ["dirty", "not_found"] && skipped.rows(.skipped)[1].profileID == "-", "worktree clean parser reads skipped rows and drops short ones")
+        expect(WorktreeCopy.reasonText("not_found", days: 30) == "No longer listed", "skipped reasons have plain wording")
+        expect(listing.entries[0].isSelectable && spare.isSelectable && !kept.isSelectable, "eligible and only-too-recent worktrees can be selected, blocked ones cannot")
+        expect(listing.entries[0].selectionKey != twice.entries[0].selectionKey && twice.entries[0].selectionKey == twice.entries[1].selectionKey, "a worktree's selection key is its profile and path")
+
+        let caches = PlainParser.caches("""
+        profile\tmain\tClaude\t/Users/example/Library/Application Support/Claude\t1
+        cache\tmain\tCode Cache\tweb\t402216
+        cache\tmain\tPartitions/preview/Cache\tpane\t-
+        cache\tmain\tclaude-code/2.1.9\tversion\t269476
+        cache\tmain\tclaude-code-vm/2.1.9\tversion\t1
+        cache\tmain\tSomething\tfuture\t10
+        cache\tmain\t\tweb\t10
+        cache\tmain
+        """)
+        expect(caches.profiles.count == 1 && caches.profiles[0].isRunning && caches.items.count == 5, "caches parser reads profiles and drops short or empty rows")
+        expect(caches.items[1].sizeKB == nil && caches.items[4].kind == .unknown && caches.items[0].id == "main:Code Cache", "caches parser maps - sizes, unknown kinds and ids")
+        expect(WorktreeCopy.cacheTitle(caches.items[0]) == "App · Script cache" && WorktreeCopy.cacheTitle(caches.items[1]) == "Browser pane preview · Web cache", "cache titles name app and browser pane caches")
+        expect(WorktreeCopy.cacheTitle(caches.items[2]) == "Claude Code 2.1.9 (older version)" && WorktreeCopy.cacheTitle(caches.items[3]) == "Claude Code for the VM 2.1.9 (older version)" && WorktreeCopy.cacheTitle(caches.items[4]) == "Something", "cache titles name old versions and fall back to the path")
+        storageChecks(oldListing: listing)
+    }
+
+    private static func storageChecks(oldListing: WorktreeList) {
+        expect(oldListing.entries.allSatisfy { $0.branchState == .unknown && !$0.canChooseBranchDeletion }, "old 13-column worktree rows still parse and offer no branch deletion")
+
+        let branches = PlainParser.worktrees("""
+        worktree\tmain\ta\t/Users/example/w/a\t/Users/example/dev/app\tclaude/a\tarchived\t2026-09-01T10:00:00+0200\t65\t0\t10\t1\t-\tTitle A\tsaved\tclaude/a
+        worktree\tmain\tb\t/Users/example/w/b\t/Users/example/dev/app\tclaude/b\tarchived\t2026-09-01T10:00:00+0200\t65\t0\t10\t1\t-\t-\tunsaved:3\tclaude/b
+        worktree\tmain\tc\t/Users/example/w/c\t/Users/example/dev/app\t-\tarchived\t2026-09-01T10:00:00+0200\t65\t0\t10\t1\t-\t-\tnone\t-
+        worktree\tmain\td\t/Users/example/w/d\t/Users/example/dev/app\tclaude/d\tarchived\t2026-09-01T10:00:00+0200\t65\t0\t10\t1\t-\t-\t-\t-
+        worktree\tmain\te\t/Users/example/w/e\t/Users/example/dev/app\tclaude/e\tarchived\t2026-09-01T10:00:00+0200\t65\t0\t10\t1\t-\t-\tunsaved:0\tclaude/e\textra
+        """).entries
+        expect(branches.count == 5 && branches[0].sessionTitle == "Title A" && branches[1].sessionTitle == nil, "worktree rows keep the title at column 13 next to the branch columns")
+        expect(branches[0].branchState == .saved && branches[0].branchName == "claude/a", "worktree branch state saved is parsed with the branch name")
+        expect(branches[1].branchState == .unsaved(3) && branches[1].branchState.unsavedCommits == 3 && branches[1].branchName == "claude/b", "worktree branch state unsaved:3 parses to 3 commits")
+        expect(branches[2].branchState == .noBranch && branches[2].branchName == nil && branches[3].branchState == .unknown, "worktree branch states none and - are parsed")
+        expect(branches[4].branchState == .unknown, "an unsaved count of zero is not a valid branch state")
+        expect(branches[0].deletesBranchByDefault && !branches[1].deletesBranchByDefault && !branches[2].deletesBranchByDefault && !branches[3].deletesBranchByDefault, "branch deletion defaults to on for saved branches only")
+        expect(branches[0].canChooseBranchDeletion && branches[1].canChooseBranchDeletion && !branches[2].canChooseBranchDeletion && !branches[3].canChooseBranchDeletion, "branch deletion can be chosen for saved and unsaved branches only")
+
+        let clean = PlainParser.worktreeClean("""
+        removed\tmain\t/Users/example/w/a\t100
+        branch_deleted\tmain\t/Users/example/w/a\tclaude/a\t0
+        removed\tmain\t/Users/example/w/b\t200
+        branch_kept\tmain\t/Users/example/w/b\tclaude/b\tunsaved\t3
+        would_delete_branch\tmain\t/Users/example/w/c\tclaude/c\t2
+        would_keep_branch\tmain\t/Users/example/w/d\tclaude/d\tchecked_out\t0
+        branch_kept\tmain\t/Users/example/w/e\tclaude/e\tfailed:cannot lock ref\t0
+        branch_deleted\tmain
+        summary\t2\t300\t0\t0\t1\t2
+        """)
+        expect(clean.rows(.branchDeleted).count == 1 && clean.rows(.branchDeleted)[0].branch == "claude/a" && clean.rows(.branchDeleted)[0].unsavedCommits == 0, "worktree clean parser reads branch_deleted rows")
+        expect(clean.rows(.branchKept).count == 2 && clean.rows(.branchKept)[0].message == "unsaved" && clean.rows(.branchKept)[0].unsavedCommits == 3 && clean.rows(.branchKept)[1].message == "failed:cannot lock ref", "worktree clean parser reads branch_kept rows with their reason")
+        expect(clean.rows(.wouldDeleteBranch).first?.unsavedCommits == 2 && clean.rows(.wouldKeepBranch).first?.message == "checked_out" && clean.rows(.wouldKeepBranch).first?.branch == "claude/d", "worktree clean parser reads the dry-run branch rows")
+        expect(clean.summary?.branchesDeleted == 1 && clean.summary?.branchesKept == 2 && clean.branchesDeleted == 1 && clean.branchesKept == 2, "worktree clean summary reads the optional branch columns")
+        let withoutBranchColumns = PlainParser.worktreeClean("removed\tmain\t/x\t1\nsummary\t1\t1\t0\t0")
+        expect(withoutBranchColumns.summary?.branchesDeleted == nil && withoutBranchColumns.branchesDeleted == 0 && withoutBranchColumns.branchesKept == 0, "worktree clean summary without branch columns still parses")
+        let outcome = WorktreeCopy.outcome(for: CommandResult(status: 0, stdout: "removed\tmain\t/Users/example/w/b\t200\nbranch_kept\tmain\t/Users/example/w/b\tclaude/b\tunsaved\t3\nsummary\t1\t200\t0\t0\t0\t1", stderr: "", timedOut: false),
+                                           names: ["main": "Claude"], noun: "worktree") { $0 }
+        expect(outcome.text.contains("Branches: 0 deleted, 1 kept.") && outcome.details == ["Branch claude/b: kept, 3 commits found nowhere else"] && !outcome.isProblem, "the worktree outcome counts branches and explains kept ones")
+        expect(WorktreeCopy.branchKeptText("protected", unsavedCommits: 0) == "Default branch, kept", "a protected branch reads as the default branch being kept")
+        expect(WorktreeCopy.branchKeptText("checked_out", unsavedCommits: 0) == "kept, still checked out in another worktree" && WorktreeCopy.branchKeptText("kept_by_flag", unsavedCommits: nil) == "kept as requested" && WorktreeCopy.branchKeptText("unsaved", unsavedCommits: 2) == "kept, 2 commits found nowhere else" && WorktreeCopy.branchKeptText("failed: cannot lock ref", unsavedCommits: 0) == "could not be deleted: cannot lock ref", "every branch_kept reason has a display text")
+        let protectedOutcome = WorktreeCopy.outcome(for: CommandResult(status: 0, stdout: "removed\tmain\t/Users/example/w/p\t10\nbranch_kept\tmain\t/Users/example/w/p\tdevelop\tprotected\t1\nsummary\t1\t10\t0\t0\t0\t1", stderr: "", timedOut: false),
+                                                    names: ["main": "Claude"], noun: "worktree") { $0 }
+        expect(protectedOutcome.details == ["Branch develop: Default branch, kept"] && !protectedOutcome.isProblem, "the worktree outcome explains a protected branch without flagging a problem")
+
+        let chosenForArguments = Array(branches[0...3])
+        let switchedOn: Set<String> = [branches[1].path]
+        let choice: (WorktreeEntry) -> Bool = { switchedOn.contains($0.path) || $0.deletesBranchByDefault }
+        let mixedArguments = WorktreeCopy.worktreeCleanArguments(target: "all", entries: chosenForArguments, keepsAllBranches: false, includeUncommitted: true, deletesBranch: choice)
+        expect(mixedArguments == ["worktrees", "--all", "clean", "--path", "/Users/example/w/a", "--path", "/Users/example/w/b", "--path", "/Users/example/w/c", "--path", "/Users/example/w/d", "--delete-branch", "/Users/example/w/b", "--include-uncommitted", "--yes", "--plain"], "clean arguments delete-branch only for unsaved rows switched on and skip rows without a branch choice")
+        let defaultArguments = WorktreeCopy.worktreeCleanArguments(target: "main", entries: Array(branches[0...1]), keepsAllBranches: false, includeUncommitted: false) { $0.deletesBranchByDefault }
+        expect(defaultArguments == ["worktrees", "main", "clean", "--path", "/Users/example/w/a", "--path", "/Users/example/w/b", "--keep-branch", "/Users/example/w/b", "--yes", "--plain"], "clean arguments keep an unsaved branch by default and pass nothing for a saved one")
+        let savedOff = WorktreeCopy.worktreeCleanArguments(target: "work", entries: [branches[0]], keepsAllBranches: false, includeUncommitted: false) { _ in false }
+        expect(savedOff == ["worktrees", "work", "clean", "--path", "/Users/example/w/a", "--keep-branch", "/Users/example/w/a", "--yes", "--plain"], "clean arguments pass --keep-branch for a saved branch switched off")
+        let keepAll = WorktreeCopy.worktreeCleanArguments(target: "all", entries: Array(branches[0...1]), keepsAllBranches: true, includeUncommitted: false) { _ in true }
+        expect(keepAll == ["worktrees", "--all", "clean", "--path", "/Users/example/w/a", "--path", "/Users/example/w/b", "--keep-branches", "--yes", "--plain"], "keeping all branches passes --keep-branches and no per-path flags")
+
+        let cacheListing = PlainParser.caches("cache\tmain\tCode Cache\tweb\t100\ncache\tmain\tvm_bundles/claudevm.bundle/rootfs.img\tvm\t9000000")
+        expect(cacheListing.items.count == 2 && cacheListing.items[1].kind == .vm && WorktreeCopy.cacheTitle(cacheListing.items[1]) == "Cowork VM disk", "caches parser reads the vm kind")
+        expect(cacheListing.items.filter(\.isPreselectedForCleanup).map(\.kind) == [.web], "the Cowork VM disk is not preselected for cleanup")
+        let unsortedCaches = PlainParser.caches("cache\tmain\tA\tweb\t-\ncache\tmain\tB\tweb\t5\ncache\tmain\tC\tversion\t900\ncache\tmain\tD\tpane\t40")
+        expect(unsortedCaches.items.sorted(by: CacheItem.biggestFirst).map(\.relativePath) == ["C", "D", "B", "A"], "lists sort biggest first, unknown sizes last")
+
+        let storage = PlainParser.storage("""
+        profile\tmain\tClaude\t/Users/example/Library/Application Support/Claude\t/Users/example/.claude\t1
+        area\tmain\tdata\tCache\tcache\t402216\tcaches
+        area\tmain\tdata\tvm_bundles\tvm\t9000000\tcaches
+        area\tmain\tconfig\tprojects\thistory\t5000\thistory
+        area\tmain\tconfig\tsettings.json\tother\t-\t-
+        area\tmain\tworktrees\t-\tworktrees\t300\tworktrees\textra
+        area\tmain\tdata\tWeird\tfuture\t4
+        area\tmain\tdata
+        total\tmain\t9407520
+        profile\tci\tCi\t-\t/Users/example/.claude-ci\t0
+        shared\tci\t/Users/example/.claude-ci\tmain
+        total\tci\tnope
+        noise
+        """)
+        expect(storage.profiles.count == 2 && storage.profiles[0].isRunning && storage.profiles[0].configDir == "/Users/example/.claude" && storage.profiles[1].dataDir == nil && !storage.profiles[1].isRunning, "storage parser reads profile rows with data and config dirs")
+        expect(storage.areas.count == 6 && storage.areas[0].location == .data && storage.areas[0].kind == .cache && storage.areas[0].tool == .caches && storage.areas[1].kind == .vm, "storage parser reads area rows")
+        expect(storage.areas[2].kind == .history && storage.areas[2].tool == .history && storage.areas[3].sizeKB == nil && storage.areas[3].tool == .nothing, "storage parser maps history areas, - sizes and the - tool")
+        expect(storage.areas[4].location == .worktrees && storage.areas[4].entry == "-" && storage.areas[4].tool == .worktrees && storage.areas[5].kind == .other && storage.areas[5].tool == .nothing, "storage parser reads the worktrees area, extra columns and unknown kinds")
+        expect(storage.totals == ["main": 9407520] && storage.totalKB(of: "main") == 9407520 && storage.totalKB(of: "ci") == 0 && storage.grandTotalKB == 9407520, "storage parser reads totals and ignores unparsable ones")
+        expect(storage.shared == [SharedConfig(profileID: "ci", configDir: "/Users/example/.claude-ci", ownerID: "main")], "storage parser reads shared config rows")
+        expect(storage.areas(of: "main").count == 6 && Set(storage.areas.map(\.id)).count == storage.areas.count, "storage areas have unique ids")
+        expect(PlainParser.storage("").profiles.isEmpty && PlainParser.storage("area\tmain").areas.isEmpty, "storage parser handles empty and truncated output")
+
+        let history = PlainParser.history("""
+        profile\tmain\tClaude\t/Users/example/.claude\t0
+        project\tmain\t-Users-example-dev-app\t/Users/example/dev/app\t12\t4096\t3
+        project\tmain\t-Users-example-gone\t-\t1\t-\t-
+        project\tmain\t\t/x\t1\t1\t1
+        project\tmain\tshort
+        profile\tci\tCi\t/Users/example/.claude-ci\t1
+        shared\tdup\t/Users/example/.claude\tmain
+        noise
+        """)
+        expect(history.profiles.count == 2 && history.profiles[0].configDir == "/Users/example/.claude" && history.profiles[1].isRunning && history.profiles[0].dataDir == nil, "history parser reads profile rows")
+        expect(history.projects.count == 2 && history.projects[0].cwd == "/Users/example/dev/app" && history.projects[0].sessions == 12 && history.projects[0].sizeKB == 4096 && history.projects[0].lastDays == 3, "history parser reads project rows")
+        expect(history.projects[1].cwd == nil && history.projects[1].sizeKB == nil && history.projects[1].lastDays == nil && history.projects[1].id == "main:-Users-example-gone", "history parser maps - columns and builds ID:NAME ids")
+        expect(history.shared == [SharedConfig(profileID: "dup", configDir: "/Users/example/.claude", ownerID: "main")], "history parser reads shared rows")
+        expect(WorktreeCopy.lastUsedText(days: 0) == "used today" && WorktreeCopy.lastUsedText(days: 1) == "used yesterday" && WorktreeCopy.lastUsedText(days: 5) == "used 5 days ago" && WorktreeCopy.lastUsedText(days: nil) == "last used unknown", "history last-used wording")
+
+        let historyClean = PlainParser.worktreeClean("""
+        removed\tmain\t-Users-example-a\t4096
+        would_remove\tmain\t-Users-example-b\t10
+        failed\tmain\t-Users-example-c\trm failed
+        skipped\tmain\t-Users-example-d\tcurrent
+        skipped\t-\t-Users-example-e\tnot_found
+        blocked\tci\trunning
+        summary\t1\t4096\t1\t1
+        """)
+        expect(historyClean.rows(.removed).first?.sizeKB == 4096 && historyClean.rows(.wouldRemove).count == 1 && historyClean.rows(.failed).first?.message == "rm failed" && historyClean.rows(.blocked).first?.profileID == "ci", "history clean rows parse with the shared clean parser")
+        expect(historyClean.rows(.skipped).map(\.message) == ["current", "not_found"] && WorktreeCopy.reasonText("current", days: 30) == "In use here", "history clean skips the current project with plain wording")
+        expect(historyClean.summary == WorktreeCleanSummary(removed: 1, freedKB: 4096, failed: 1, blocked: 1), "history clean summary has no branch columns")
     }
 
     private static func ownerChecks() {

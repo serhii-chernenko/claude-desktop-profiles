@@ -20,6 +20,7 @@ enum ActiveSheet: Identifiable {
     case remove(Profile)
     case check(CheckReport)
     case addProjects(Profile)
+    case worktrees(String?)
 
     var id: String {
         switch self {
@@ -28,6 +29,7 @@ enum ActiveSheet: Identifiable {
         case .remove(let profile): return "remove-" + profile.slug
         case .check(let report): return "check-" + report.id.uuidString
         case .addProjects(let profile): return "projects-" + profile.slug
+        case .worktrees(let target): return "worktrees-" + (target ?? "all")
         }
     }
 }

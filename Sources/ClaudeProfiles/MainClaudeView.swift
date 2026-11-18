@@ -51,6 +51,14 @@ struct MainClaudeView: View {
                     }
                     .disabled(model.isBusy || !model.sourceAppPresent)
                 }
+                ActionRow(title: "Storage",
+                          caption: "See where the space goes, then clean old Code worktrees, caches and project history, after looking at what is there. Sign-ins stay.",
+                          systemImage: "externaldrive.badge.minus") {
+                    Button("Storage…") {
+                        model.sheet = .worktrees("main")
+                    }
+                    .disabled(model.isBusy || model.cliMissing)
+                }
                 if let scheme = model.status?.handlerScheme, let handler = model.status?.handlerBundleID {
                     LabeledContent("\(scheme):// links open") {
                         Text(handler)

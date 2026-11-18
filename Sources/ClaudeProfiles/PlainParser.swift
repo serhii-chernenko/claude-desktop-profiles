@@ -198,6 +198,192 @@ enum PlainParser {
         }
     }
 
+    static func worktrees(_ text: String) -> WorktreeList {
+        var list = WorktreeList()
+        for columns in rows(text) {
+            func column(_ index: Int) -> String? { columns.count > index ? columns[index] : nil }
+            switch columns[0] {
+            case "profile" where columns.count >= 5 && !columns[1].isEmpty:
+                list.profiles.append(WorktreeProfile(
+                    id: columns[1],
+                    name: optional(column(2)) ?? columns[1],
+                    dataDir: optional(column(3)),
+                    isRunning: flag(column(4)) ?? false,
+                    hasRegistry: flag(column(5)) ?? false
+                ))
+            case "worktree" where columns.count >= 12 && !columns[1].isEmpty:
+                list.entries.append(WorktreeEntry(
+                    position: list.entries.count,
+                    profileID: columns[1],
+                    name: columns[2],
+                    path: columns[3],
+                    repo: optional(column(4)),
+                    branch: optional(column(5)),
+                    state: WorktreeState(raw: optional(column(6)) ?? ""),
+                    lastActive: date(column(7)),
+                    idleDays: Int(optional(column(8)) ?? "") ?? 0,
+                    isDirty: flag(column(9)),
+                    sizeKB: Int(optional(column(10)) ?? ""),
+                    isEligible: flag(column(11)) ?? false,
+                    reason: optional(column(12)),
+                    sessionTitle: optional(column(13)),
+                    branchState: BranchState(raw: column(14)),
+                    branchName: optional(column(15))
+                ))
+            default:
+                continue
+            }
+        }
+        return list
+    }
+
+    static func caches(_ text: String) -> CacheList {
+        var list = CacheList()
+        for columns in rows(text) {
+            func column(_ index: Int) -> String? { columns.count > index ? columns[index] : nil }
+            switch columns[0] {
+            case "profile" where columns.count >= 5 && !columns[1].isEmpty:
+                list.profiles.append(WorktreeProfile(
+                    id: columns[1],
+                    name: optional(column(2)) ?? columns[1],
+                    dataDir: optional(column(3)),
+                    isRunning: flag(column(4)) ?? false,
+                    hasRegistry: false
+                ))
+            case "cache" where columns.count >= 4 && !columns[1].isEmpty && !columns[2].isEmpty:
+                list.items.append(CacheItem(
+                    profileID: columns[1],
+                    relativePath: columns[2],
+                    kind: CacheKind(raw: columns[3]),
+                    sizeKB: Int(optional(column(4)) ?? "")
+                ))
+            default:
+                continue
+            }
+        }
+        return list
+    }
+
+    static func worktreeClean(_ text: String) -> WorktreeCleanResult {
+        var result = WorktreeCleanResult()
+        for columns in rows(text) {
+            func column(_ index: Int) -> String? { columns.count > index ? columns[index] : nil }
+            switch columns[0] {
+            case "blocked" where columns.count >= 2:
+                result.rows.append(WorktreeCleanRow(kind: .blocked, profileID: columns[1], path: nil, sizeKB: nil, message: optional(column(2))))
+            case "removed" where columns.count >= 3, "would_remove" where columns.count >= 3:
+                result.rows.append(WorktreeCleanRow(
+                    kind: columns[0] == "removed" ? .removed : .wouldRemove,
+                    profileID: columns[1],
+                    path: columns[2],
+                    sizeKB: Int(optional(column(3)) ?? ""),
+                    message: nil
+                ))
+            case "failed" where columns.count >= 3:
+                result.rows.append(WorktreeCleanRow(kind: .failed, profileID: columns[1], path: columns[2], sizeKB: nil, message: optional(column(3))))
+            case "skipped" where columns.count >= 3:
+                result.rows.append(WorktreeCleanRow(kind: .skipped, profileID: columns[1], path: columns[2], sizeKB: nil, message: optional(column(3))))
+            case "branch_deleted" where columns.count >= 4, "would_delete_branch" where columns.count >= 4:
+                result.rows.append(WorktreeCleanRow(
+                    kind: columns[0] == "branch_deleted" ? .branchDeleted : .wouldDeleteBranch,
+                    profileID: columns[1],
+                    path: columns[2],
+                    sizeKB: nil,
+                    message: nil,
+                    branch: columns[3],
+                    unsavedCommits: Int(optional(column(4)) ?? "")
+                ))
+            case "branch_kept" where columns.count >= 5, "would_keep_branch" where columns.count >= 5:
+                result.rows.append(WorktreeCleanRow(
+                    kind: columns[0] == "branch_kept" ? .branchKept : .wouldKeepBranch,
+                    profileID: columns[1],
+                    path: columns[2],
+                    sizeKB: nil,
+                    message: optional(column(4)),
+                    branch: columns[3],
+                    unsavedCommits: Int(optional(column(5)) ?? "")
+                ))
+            case "summary" where columns.count >= 5:
+                result.summary = WorktreeCleanSummary(
+                    removed: Int(columns[1]) ?? 0,
+                    freedKB: Int(columns[2]) ?? 0,
+                    failed: Int(columns[3]) ?? 0,
+                    blocked: Int(columns[4]) ?? 0,
+                    branchesDeleted: Int(optional(column(5)) ?? ""),
+                    branchesKept: Int(optional(column(6)) ?? "")
+                )
+            default:
+                continue
+            }
+        }
+        return result
+    }
+
+    static func storage(_ text: String) -> StorageList {
+        var list = StorageList()
+        for columns in rows(text) {
+            func column(_ index: Int) -> String? { columns.count > index ? columns[index] : nil }
+            switch columns[0] {
+            case "profile" where columns.count >= 5 && !columns[1].isEmpty:
+                list.profiles.append(StorageProfile(
+                    id: columns[1],
+                    name: optional(column(2)) ?? columns[1],
+                    dataDir: optional(column(3)),
+                    configDir: optional(column(4)),
+                    isRunning: flag(column(5)) ?? false
+                ))
+            case "area" where columns.count >= 6 && !columns[1].isEmpty:
+                list.areas.append(StorageArea(
+                    position: list.areas.count,
+                    profileID: columns[1],
+                    location: StorageLocation(raw: columns[2]),
+                    entry: columns[3],
+                    kind: StorageKind(raw: columns[4]),
+                    sizeKB: Int(optional(column(5)) ?? ""),
+                    tool: StorageTool(raw: optional(column(6)))
+                ))
+            case "total" where columns.count >= 3 && !columns[1].isEmpty:
+                if let kilobytes = Int(columns[2]) { list.totals[columns[1]] = kilobytes }
+            case "shared" where columns.count >= 4 && !columns[1].isEmpty:
+                list.shared.append(SharedConfig(profileID: columns[1], configDir: columns[2], ownerID: columns[3]))
+            default:
+                continue
+            }
+        }
+        return list
+    }
+
+    static func history(_ text: String) -> HistoryList {
+        var list = HistoryList()
+        for columns in rows(text) {
+            func column(_ index: Int) -> String? { columns.count > index ? columns[index] : nil }
+            switch columns[0] {
+            case "profile" where columns.count >= 4 && !columns[1].isEmpty:
+                list.profiles.append(StorageProfile(
+                    id: columns[1],
+                    name: optional(column(2)) ?? columns[1],
+                    dataDir: nil,
+                    configDir: optional(column(3)),
+                    isRunning: flag(column(4)) ?? false
+                ))
+            case "project" where columns.count >= 6 && !columns[1].isEmpty && !columns[2].isEmpty:
+                list.projects.append(HistoryProject(
+                    profileID: columns[1],
+                    name: columns[2],
+                    cwd: optional(column(3)),
+                    sessions: Int(optional(column(4)) ?? "") ?? 0,
+                    sizeKB: Int(optional(column(5)) ?? ""),
+                    lastDays: Int(optional(column(6)) ?? "")
+                ))
+            case "shared" where columns.count >= 4 && !columns[1].isEmpty:
+                list.shared.append(SharedConfig(profileID: columns[1], configDir: columns[2], ownerID: columns[3]))
+            default:
+                continue
+            }
+        }
+        return list
+    }
+
     static func checkLines(_ text: String) -> (heading: String?, lines: [CheckLine]) {
         var heading: String?
         var lines: [CheckLine] = []
